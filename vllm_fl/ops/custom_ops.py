@@ -7,7 +7,14 @@ from vllm.model_executor.custom_op import CustomOp
 from .layernorm import *  # noqa F403 F401
 from .activation import *  # noqa F403 F401
 from .rotary_embedding import *  # noqa F403 F401
-from .fused_moe import *  # noqa F403 F401
+
+_HAS_FUSED_MOE = True
+try:
+    from .fused_moe import *  # noqa F403 F401
+except Exception as e:  # pragma: no cover - import-time compatibility guard
+    _HAS_FUSED_MOE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("Failed to import FL fused_moe ops, falling back to vLLM native MoE: %s", e)
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +29,18 @@ OOT_OPS = {
     "gelu_and_mul": (GeluAndMulFL, "GeluAndMul"),  # noqa F405
     "rms_norm": (RMSNormFL, "RMSNorm"),  # noqa F405
     "rotary_embedding": (RotaryEmbeddingFL, "RotaryEmbedding"),  # noqa F405
-    "fused_moe": (FusedMoEFL, "FusedMoE"),  # noqa F405
-    "unquantized_fused_moe_method": (
-        UnquantizedFusedMoEMethodFL,  # noqa F405
-        "UnquantizedFusedMoEMethod",
-    ),
 }
+
+if _HAS_FUSED_MOE:
+    OOT_OPS.update(
+        {
+            "fused_moe": (FusedMoEFL, "FusedMoE"),  # noqa F405
+            "unquantized_fused_moe_method": (
+                UnquantizedFusedMoEMethodFL,  # noqa F405
+                "UnquantizedFusedMoEMethod",
+            ),
+        }
+    )
 
 
 def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:

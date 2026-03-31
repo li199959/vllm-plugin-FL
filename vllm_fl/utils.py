@@ -4,11 +4,74 @@ import json
 import os
 from typing import Optional, Tuple
 
-import flag_gems
-from flag_gems.runtime.backend.device import DeviceDetector
-from flag_gems.runtime import backend
+try:
+    import flag_gems
+    from flag_gems.runtime import backend
+    from flag_gems.runtime.backend.device import DeviceDetector
+except ImportError:  # pragma: no cover - optional dependency
+    flag_gems = None
+    backend = None
+    DeviceDetector = None
 
 _OP_CONFIG: Optional[dict[str, str]] = None
+
+
+# Mapping used by dispatch registration to resolve the current runtime platform
+# into a backend directory under dispatch/backends/vendor.
+#
+# Field definitions and sources:
+# - top-level key (vendor_name): normalized hardware vendor identifier.
+#   Source: runtime platform detection (current_platform.vendor_name) and
+#   fallback device probing (DeviceInfo.vendor_name).
+# - device_type: compute class reported by runtime, such as "cuda" or "npu".
+#   Source: runtime platform detection (current_platform.device_type) and
+#   fallback device probing (DeviceInfo.device_type).
+# - device_name: runtime device family/product alias used by vLLM platform.
+#   Source: runtime platform detection (current_platform.device_name).
+#
+# Values are normalized to lowercase and matched against available backend
+# subdirectories (for example, cuda/ascend/metax/iluvatar).
+VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
+    # Registered backend: vendor/cuda
+    "nvidia": {"device_type": "cuda", "device_name": "nvidia"},
+    # Registered backend: vendor/ascend
+    "ascend": {"device_type": "npu", "device_name": "npu"},
+    # Registered backend: vendor/iluvatar
+    "iluvatar": {"device_type": "cuda", "device_name": "cuda"},
+    # Registered backend: vendor/metax
+    "metax": {"device_type": "cuda", "device_name": "metax"},
+}
+
+
+def _get_vendor_device_field(vendor_name: str, field: str) -> str:
+    """Get a required field from VENDOR_DEVICE_MAP for the specified vendor."""
+    if not isinstance(vendor_name, str) or not vendor_name.strip():
+        raise ValueError("vendor_name must be a non-empty string.")
+
+    normalized_vendor = vendor_name
+    device_info = VENDOR_DEVICE_MAP.get(normalized_vendor)
+    if not isinstance(device_info, dict):
+        raise ValueError(
+            f"Vendor '{normalized_vendor}' not found in VENDOR_DEVICE_MAP."
+        )
+
+    value = device_info.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Field '{field}' for vendor '{normalized_vendor}' is missing "
+            "or empty in VENDOR_DEVICE_MAP."
+        )
+    return value
+
+
+def get_device_type(vendor_name: str) -> str:
+    """Return the configured device_type for the given vendor."""
+    return _get_vendor_device_field(vendor_name, "device_type")
+
+
+def get_device_name(vendor_name: str) -> str:
+    """Return the configured device_name for the given vendor."""
+    return _get_vendor_device_field(vendor_name, "device_name")
 
 
 def use_flaggems(default: bool = True) -> bool:
@@ -144,30 +207,49 @@ _load_op_config_from_env()
 
 class DeviceInfo:
     def __init__(self):
+        if DeviceDetector is None or backend is None:
+            self.device = None
+            self.supported_device = ["nvidia"]
+            return
+
         self.device = DeviceDetector()
         self.supported_device = ["nvidia", "ascend", "metax"]
         backend.set_torch_backend_device_fn(self.device.vendor_name)
 
     @property
     def dispatch_key(self):
+        if self.device is None:
+            return "CUDA"
         return self.device.dispatch_key
 
     @property
     def vendor_name(self):
+        if self.device is None:
+            return "nvidia"
         return self.device.vendor_name
 
     @property
     def device_type(self):
+        if self.device is None:
+            return "cuda"
         return self.device.name
 
     @property
     def torch_device_fn(self):
         # torch_device_fn is like 'torch.cuda' object
+        if backend is None:
+            import torch
+
+            return torch.cuda
         return backend.gen_torch_device_object()
 
     @property
     def torch_backend_device(self):
         # torch_backend_device is like 'torch.backend.cuda' object
+        if backend is None:
+            import torch
+
+            return torch.cuda
         return backend.get_torch_backend_device_fn()
 
     def get_supported_device(self):
@@ -181,6 +263,8 @@ def get_flaggems_all_ops() -> list[str]:
     Get all FlagGems operator names from flag_gems._FULL_CONFIG.
     """
     try:
+        if flag_gems is None:
+            return []
         # _FULL_CONFIG is a tuple of (op_name, function, ...) tuples
         # Some entries have 2 elements, some have 3
         ops = [entry[0] for entry in flag_gems._FULL_CONFIG]

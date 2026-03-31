@@ -18,7 +18,7 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
     is_quantized_kv_cache,
 )
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 

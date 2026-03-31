@@ -10,8 +10,12 @@ import torch.nn.functional as F
 from functools import partial
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulator,
+)
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 from vllm.platforms import current_platform
 from vllm._aiter_ops import rocm_aiter_ops

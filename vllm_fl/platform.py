@@ -16,20 +16,20 @@ try:
 except (ImportError, OSError):
     pass  # NPU or other platforms may not have vllm._C
 
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.platforms.interface import DeviceCapability
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
     CacheDType = None
 
-from vllm_fl.utils import DeviceInfo
+from vllm_fl.utils import DeviceInfo, get_device_name, get_device_type
 
 logger = init_logger(__name__)
 
@@ -46,12 +46,8 @@ class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
     device_info = DeviceInfo()
     vendor_name = device_info.vendor_name
-    # cuda_alike (nvidia/metax): device_name = vendor_name (not used in torch.device)
-    # non-cuda_alike (iluvatar/ascend): device_name = device_type (used in torch.device)
-    device_name = device_info.vendor_name if (
-        device_info.device_type == "cuda" and device_info.vendor_name != "iluvatar"
-    ) else device_info.device_type
-    device_type = device_info.device_type
+    device_type = get_device_type(vendor_name)
+    device_name = get_device_name(vendor_name)
     dispatch_key = device_info.dispatch_key
     torch_device_fn = device_info.torch_device_fn
     ray_device_key: str = "GPU"
@@ -204,7 +200,7 @@ class PlatformFL(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
-    ) -> list[str]:
+    ) -> str:
         """Get the attention backend class path using the dispatch mechanism."""
         from vllm_fl.dispatch import call_op
 
@@ -239,7 +235,7 @@ class PlatformFL(Platform):
         head_size: int,
         dtype: torch.dtype,
         backend: Optional["AttentionBackendEnum"] = None,
-    ) -> list[str]:
+    ) -> "AttentionBackendEnum":
         from vllm_fl.attention.utils import patch_mm_encoder_attention
 
         patch_mm_encoder_attention()
