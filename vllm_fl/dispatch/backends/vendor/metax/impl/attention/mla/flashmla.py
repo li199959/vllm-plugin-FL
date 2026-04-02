@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, AttentionType, MultipleOf
 from ..ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
@@ -34,7 +34,7 @@ from vllm.v1.attention.backends.utils import (
     reshape_query_for_spec_decode,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
 logger = init_logger(__name__)
 

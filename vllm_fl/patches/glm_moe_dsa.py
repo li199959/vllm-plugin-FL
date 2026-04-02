@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.13.0 compatibility.
+"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.18.0 compatibility.
 
 All monkey-patches required to run GLM-5 FP8 on the current environment
 (transformers 4.57.6, CUDA 13.1, no deep_gemm JIT) are collected here.
@@ -16,6 +16,9 @@ def patch_tokenizer_compat():
     GLM-5's tokenizer uses transformers 5.x naming (TokenizersBackend) and
     special_tokens format (list instead of dict). This patches both issues
     so the tokenizer loads correctly on transformers 4.57.6.
+
+    Note: vocab_file=None fix is handled in vllm_fl/__init__.py
+    _patch_transformers_compat().
     """
     try:
         import transformers.models.auto.tokenization_auto as ta
@@ -50,6 +53,9 @@ def patch_tokenizer_compat():
             tub.SpecialTokensMixin._fl_patched_special = True
     except Exception:
         pass
+
+    # Note: vocab_file=None patch is handled in vllm_fl/__init__.py
+    # _patch_transformers_compat() to avoid double patching
 
 
 def patch_is_deepseek_mla():

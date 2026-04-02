@@ -28,6 +28,90 @@ def _patch_transformers_compat():
             cfg, "ALLOWED_ATTENTION_LAYER_TYPES", ()
         )
 
+    # Fix: GLM/GLM-4/ChatGLM tokenizers cannot be converted from slow to fast
+    # tokenizer format in transformers 4.57.6.
+    #
+    # Patch convert_slow_tokenizer at the module level. When vocab_file is None,
+    # set it to "" to avoid crashes in tiktoken/bpe loaders.
+    try:
+        import transformers.convert_slow_tokenizer as _cst
+        if not getattr(_cst.convert_slow_tokenizer, "_vllm_fl_patched", False):
+            _orig = _cst.convert_slow_tokenizer
+
+            def _safe_convert(tokenizer, *args, **kwargs):
+                orig_vf = getattr(tokenizer, "vocab_file", None)
+                if orig_vf is None:
+                    tokenizer.vocab_file = ""
+                try:
+                    return _orig(tokenizer, *args, **kwargs)
+                finally:
+                    if orig_vf is None:
+                        tokenizer.vocab_file = orig_vf
+
+            _safe_convert._vllm_fl_patched = True
+            _cst.convert_slow_tokenizer = _safe_convert
+
+            try:
+                import transformers.tokenization_utils_fast as _tuf
+                _tuf.convert_slow_tokenizer = _safe_convert
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Retry GLM-family tokenizer loading with use_fast=False when the
+    # fast-tokenizer conversion path fails under transformers 4.57.x.
+    try:
+        import transformers.models.auto.tokenization_auto as _ta
+
+        if not getattr(_ta.AutoTokenizer.from_pretrained,
+                       "_vllm_fl_patched", False):
+            _orig_from_pretrained = _ta.AutoTokenizer.from_pretrained.__func__
+
+            def _should_retry_with_slow(exc: Exception) -> bool:
+                err = str(exc)
+                return any(msg in err for msg in (
+                    "Converting from SentencePiece and Tiktoken failed",
+                    "No such file or directory: ''",
+                    "has no attribute truncation",
+                ))
+
+            def _safe_from_pretrained(cls, pretrained_model_name_or_path,
+                                      *inputs, **kwargs):
+                if kwargs.get("use_fast") is False:
+                    return _orig_from_pretrained(
+                        cls, pretrained_model_name_or_path, *inputs, **kwargs
+                    )
+
+                try:
+                    return _orig_from_pretrained(
+                        cls, pretrained_model_name_or_path, *inputs, **kwargs
+                    )
+                except (ValueError, FileNotFoundError, TypeError,
+                        AttributeError) as exc:
+                    if not _should_retry_with_slow(exc):
+                        raise
+
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["use_fast"] = False
+                    logger.warning(
+                        "Fast tokenizer conversion failed for %s; retrying "
+                        "with use_fast=False. Original error: %s",
+                        pretrained_model_name_or_path,
+                        exc,
+                    )
+                    return _orig_from_pretrained(
+                        cls, pretrained_model_name_or_path, *inputs,
+                        **retry_kwargs
+                    )
+
+            _safe_from_pretrained._vllm_fl_patched = True
+            _ta.AutoTokenizer.from_pretrained = classmethod(
+                _safe_from_pretrained
+            )
+    except Exception:
+        pass
+
 
 def register():
     """Register the FL platform."""

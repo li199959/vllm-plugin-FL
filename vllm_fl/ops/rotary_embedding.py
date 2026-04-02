@@ -32,36 +32,40 @@ class RotaryEmbeddingFL(RotaryEmbedding):
         num_tokens = positions.shape[0]
 
         query_shape = query.shape
-        key_shape = key.shape
         query = query.view(num_tokens, -1, self.head_size)
-        key = key.view(num_tokens, -1, self.head_size)
-
         query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim:]
-            key_pass = key[..., self.rotary_dim:]
-
-        cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
+        key_shape = None
+        key_rot = None
+        key_pass = None
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., : self.rotary_dim]
+            if self.rotary_dim < self.head_size:
+                key_pass = key[..., self.rotary_dim:]
 
         q_embed, k_embed = call_op(
             "rotary_embedding",
             self,
             query_rot,
             key_rot,
-            cos,
-            sin,
+            self.head_size,
+            self.cos_sin_cache,
             positions,
-            not self.is_neox_style,  # rotary_interleaved
-            True,  # inplace
+            self.is_neox_style,
         )
 
         if self.rotary_dim < self.head_size:
             query = torch.cat((q_embed, query_pass), dim=-1).reshape(query_shape)
-            key = torch.cat((k_embed, key_pass), dim=-1).reshape(key_shape)
+            if k_embed is not None and key_pass is not None and key_shape is not None:
+                key = torch.cat((k_embed, key_pass), dim=-1).reshape(key_shape)
+            else:
+                key = None
         else:
             query = q_embed.reshape(query_shape)
-            key = k_embed.reshape(key_shape)
+            key = k_embed.reshape(key_shape) if k_embed is not None and key_shape is not None else None
 
         return query, key
 

@@ -2,7 +2,7 @@
 # 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.attention.utils.fa_utils import logger
+from vllm.v1.attention.backends.fa_utils import logger
 from vllm.platforms import current_platform
 
 

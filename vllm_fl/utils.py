@@ -4,9 +4,14 @@ import json
 import os
 from typing import Optional, Tuple
 
-import flag_gems
-from flag_gems.runtime.backend.device import DeviceDetector
-from flag_gems.runtime import backend
+try:
+    import flag_gems
+    from flag_gems.runtime import backend
+    from flag_gems.runtime.backend.device import DeviceDetector
+except ImportError:  # pragma: no cover - optional dependency
+    flag_gems = None
+    backend = None
+    DeviceDetector = None
 
 _OP_CONFIG: Optional[dict[str, str]] = None
 
@@ -144,30 +149,49 @@ _load_op_config_from_env()
 
 class DeviceInfo:
     def __init__(self):
+        if DeviceDetector is None or backend is None:
+            self.device = None
+            self.supported_device = ["nvidia"]
+            return
+
         self.device = DeviceDetector()
         self.supported_device = ["nvidia", "ascend", "metax"]
         backend.set_torch_backend_device_fn(self.device.vendor_name)
 
     @property
     def dispatch_key(self):
+        if self.device is None:
+            return "CUDA"
         return self.device.dispatch_key
 
     @property
     def vendor_name(self):
+        if self.device is None:
+            return "nvidia"
         return self.device.vendor_name
 
     @property
     def device_type(self):
+        if self.device is None:
+            return "cuda"
         return self.device.name
 
     @property
     def torch_device_fn(self):
         # torch_device_fn is like 'torch.cuda' object
+        if backend is None:
+            import torch
+
+            return torch.cuda
         return backend.gen_torch_device_object()
 
     @property
     def torch_backend_device(self):
         # torch_backend_device is like 'torch.backend.cuda' object
+        if backend is None:
+            import torch
+
+            return torch.cuda
         return backend.get_torch_backend_device_fn()
 
     def get_supported_device(self):
@@ -181,6 +205,8 @@ def get_flaggems_all_ops() -> list[str]:
     Get all FlagGems operator names from flag_gems._FULL_CONFIG.
     """
     try:
+        if flag_gems is None:
+            return []
         # _FULL_CONFIG is a tuple of (op_name, function, ...) tuples
         # Some entries have 2 elements, some have 3
         ops = [entry[0] for entry in flag_gems._FULL_CONFIG]

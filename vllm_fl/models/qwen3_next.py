@@ -9,8 +9,8 @@ import torch
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.layer import Attention
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.model_executor.layers.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,

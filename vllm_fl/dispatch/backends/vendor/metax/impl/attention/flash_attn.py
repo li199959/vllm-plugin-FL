@@ -9,15 +9,15 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
 )
-from vllm.attention.layer import Attention
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 
 # --------------------------------------------------------------
 # Note: use Maca's merge_attn_states to get cuda kernel invoked
@@ -56,7 +56,7 @@ from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,  # used for prefill decode split with mtp
     reshape_query_for_spec_decode,  # used for prefill decode split with mtp
 )
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # --------------------------------------------------------------

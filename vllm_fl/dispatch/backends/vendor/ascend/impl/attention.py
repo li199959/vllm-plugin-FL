@@ -28,7 +28,7 @@ from typing import Any, ClassVar, List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionLayer,

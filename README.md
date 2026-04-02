@@ -1,5 +1,7 @@
 # vllm-plugin-FL
 
+This branch targets `vLLM 0.18.x`. Mixed installs with older `vLLM 0.16.x` or `0.13.x` are not supported.
+
 vllm-plugin-FL is a plugin for the [vLLM](https://github.com/vllm-project/vllm) inference/serving framework, built on FlagOS's unified multi-chip backend — including the unified operator library [FlagGems](https://github.com/flagos-ai/FlagGems) and the unified communication library [FlagCX](https://github.com/flagos-ai/FlagCX). It extends vLLM's capabilities and performance across diverse hardware environments. Without changing vLLM's original interfaces or usage patterns, the same command can run model inference/serving on different chips.
 
 ## Supported Models and Chips
@@ -35,7 +37,7 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
 
 ### Setup
 
-1. Install vllm from the official [v0.13.0](https://github.com/vllm-project/vllm/tree/v0.13.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
+1. Install vllm from the official [v0.18.0](https://github.com/vllm-project/vllm/tree/v0.18.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
 
 
 2. Install vllm-plugin-FL

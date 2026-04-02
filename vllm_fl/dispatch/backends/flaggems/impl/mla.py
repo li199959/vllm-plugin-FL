@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,

@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.11.0/vllm/v1/attention/backends/flash_attn.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.16.0/vllm/v1/attention/backends/flash_attn.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -11,16 +11,16 @@ import numpy as np
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
 )
-from vllm.attention.layer import Attention
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
@@ -555,8 +555,8 @@ class AttentionFLImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                getattr(layer, '_k_scale', None),
+                getattr(layer, '_v_scale', None),
             )
 
         if not attn_metadata.use_cascade:
@@ -578,13 +578,13 @@ class AttentionFLImpl(AttentionImpl):
                     value_cache,
                     output[:num_actual_tokens],
                     attn_metadata,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
+                    q_descale=layer._q_scale.expand(descale_shape) if layer._q_scale is not None else None,
+                    k_descale=layer._k_scale.expand(descale_shape) if layer._k_scale is not None else None,
+                    v_descale=layer._v_scale.expand(descale_shape) if layer._v_scale is not None else None,
                 )
                 return output
             else:
-                flash_attn_varlen_func(
+                _fa_result = flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -601,12 +601,17 @@ class AttentionFLImpl(AttentionImpl):
                     softcap=self.logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,
                     fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
+                    q_descale=layer._q_scale.expand(descale_shape) if layer._q_scale is not None else None,
+                    k_descale=layer._k_scale.expand(descale_shape) if layer._k_scale is not None else None,
+                    v_descale=layer._v_scale.expand(descale_shape) if layer._v_scale is not None else None,
                     num_splits=attn_metadata.max_num_splits,
-                    s_aux=None, ### self.sinks is support in FA3
+                    s_aux=None,
                 )
+                # v0.16.0 flash_attn_varlen_func returns (output, ...) tuple
+                if isinstance(_fa_result, tuple):
+                    output[:num_actual_tokens] = _fa_result[0]
+                else:
+                    output[:num_actual_tokens] = _fa_result
                 return output
 
         # Cascade attention (rare case).
@@ -630,9 +635,9 @@ class AttentionFLImpl(AttentionImpl):
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
-            q_descale=layer._q_scale,
-            k_descale=layer._k_scale,
-            v_descale=layer._v_scale,
+            q_descale=layer._q_scale if layer._q_scale is not None else None,
+            k_descale=layer._k_scale if layer._k_scale is not None else None,
+            v_descale=layer._v_scale if layer._v_scale is not None else None,
             s_aux=None, ## sink is None
         )
         return output
@@ -754,7 +759,7 @@ class AttentionFLImpl(AttentionImpl):
         )
 
         # Call flash attention directly on Q, K, V tensors
-        flash_attn_varlen_func(
+        _fa_result = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
@@ -769,11 +774,14 @@ class AttentionFLImpl(AttentionImpl):
             window_size=self.sliding_window,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape),
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
+            q_descale=layer._q_scale.expand(descale_shape) if layer._q_scale is not None else None,
+            k_descale=layer._k_scale.expand(descale_shape) if layer._k_scale is not None else None,
+            v_descale=layer._v_scale.expand(descale_shape) if layer._v_scale is not None else None,
             # num_splits=0,
         )
+        # v0.16.0 flash_attn_varlen_func returns (output, ...) tuple
+        if isinstance(_fa_result, tuple):
+            output.copy_(_fa_result[0])
 
         return output
 

@@ -1,14 +1,18 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.11.0/vllm/platforms/cuda.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.18.0/vllm/platforms/cuda.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from datetime import timedelta
+from functools import cache
 from typing import TYPE_CHECKING, Optional, TypeVar
 from typing_extensions import ParamSpec
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 
 # import custom ops, trigger op registration (CUDA only)
 try:
@@ -16,13 +20,13 @@ try:
 except (ImportError, OSError):
     pass  # NPU or other platforms may not have vllm._C
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
 else:
@@ -103,7 +107,33 @@ class PlatformFL(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
+        if cls.device_type == "cuda":
+            return torch.cuda.get_device_name(device_id)
         return cls.device_name
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        if cls.device_type != "cuda":
+            raise NotImplementedError(
+                f"get_device_uuid is not implemented for device_type={cls.device_type!r}"
+            )
+
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            return pynvml.nvmlDeviceGetUUID(handle)
+        except Exception:
+            # Fall back to a stable per-process identifier if NVML is unavailable.
+            return f"cuda:{cls.device_id_to_physical_device_id(device_id)}"
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        if cls.device_type == "cuda":
+            return torch.cuda.get_device_properties(device_id).total_memory
+        return int(cls.torch_device_fn.get_device_properties(device_id).total_memory)
 
     ### TODO(lms): change pin_memory depend device
     @classmethod
@@ -202,9 +232,10 @@ class PlatformFL(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum",
+        selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
-    ) -> list[str]:
+        num_heads: int | None = None,
+    ) -> str:
         """Get the attention backend class path using the dispatch mechanism."""
         from vllm_fl.dispatch import call_op
 
@@ -228,9 +259,18 @@ class PlatformFL(Platform):
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        if (cc := cls.get_device_capability()) and cc.major >= 8:
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FLASHINFER,
+            ]
         return [
-            AttentionBackendEnum.TORCH_SDPA,
             AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.FLASHINFER,
         ]
 
     @classmethod
@@ -239,7 +279,7 @@ class PlatformFL(Platform):
         head_size: int,
         dtype: torch.dtype,
         backend: Optional["AttentionBackendEnum"] = None,
-    ) -> list[str]:
+    ) -> "AttentionBackendEnum":
         from vllm_fl.attention.utils import patch_mm_encoder_attention
 
         patch_mm_encoder_attention()
@@ -281,6 +321,38 @@ class PlatformFL(Platform):
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm_fl.compilation.graph.GraphWrapper"
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        if backend != "nccl":
+            raise NotImplementedError(
+                f"PlatformFL only supports stateless torch dist init for NCCL, got {backend!r}"
+            )
+        assert is_nccl_available()
+
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
@@ -341,6 +413,15 @@ class PlatformFL(Platform):
         # For CUDA devices
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
+
+    @classmethod
+    @cache
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        if cls.device_type != "cuda":
+            raise NotImplementedError(
+                f"num_compute_units is not implemented for device_type={cls.device_type!r}"
+            )
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:

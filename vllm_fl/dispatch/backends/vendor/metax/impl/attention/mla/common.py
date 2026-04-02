@@ -198,13 +198,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
     MLAAttentionImpl,
 )
-from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 
 # --------------------------------------------------------------
 # Note: use Maca's merge_attn_states to get cuda kernel invoked
