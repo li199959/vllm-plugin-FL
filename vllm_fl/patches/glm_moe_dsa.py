@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.18.0 compatibility.
+"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.18.1.
 
 All monkey-patches required to run GLM-5 FP8 on the current environment
 (transformers 4.57.6, CUDA 13.1, no deep_gemm JIT) are collected here.
@@ -57,30 +57,10 @@ def patch_tokenizer_compat():
     # Note: vocab_file=None patch is handled in vllm_fl/__init__.py
     # _patch_transformers_compat() to avoid double patching
 
-
-def patch_is_deepseek_mla():
-    """Patch ModelConfig.is_deepseek_mla to recognise glm_moe_dsa as MLA."""
-    from vllm.config.model import ModelConfig
-    _orig_is_mla = ModelConfig.is_deepseek_mla.fget
-
-    @property
-    def _patched_is_mla(self):
-        if (
-            hasattr(self.hf_text_config, "model_type")
-            and self.hf_text_config.model_type == "glm_moe_dsa"
-            and getattr(self.hf_text_config, "kv_lora_rank", None)
-            is not None
-        ):
-            return True
-        return _orig_is_mla(self)
-
-    ModelConfig.is_deepseek_mla = _patched_is_mla
-
-
 def patch_fp8_mqa_logits_dim():
     """Fix k_scale dim mismatch for deep_gemm fp8_mqa_logits.
 
-    vLLM 0.13.0 passes k_scale as [N, 1] but deep_gemm 2.3.0 expects [N].
+    Older DeepGEMM builds may still expect [N] instead of [N, 1].
     Upstream fix: https://github.com/vllm-project/vllm/pull/32652
     We wrap fp8_mqa_logits to flatten k_scale before calling the native impl.
     """
@@ -88,18 +68,31 @@ def patch_fp8_mqa_logits_dim():
 
     dg_mod._lazy_init()
     _orig_impl = dg_mod._fp8_mqa_logits_impl
-    if _orig_impl is None:
+    if _orig_impl is None or getattr(_orig_impl, "_fl_glm_fp8_patch", False):
         return
 
-    def _fixed_fp8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke):
+    def _fixed_fp8_mqa_logits(
+        q,
+        kv,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        *args,
+        **kwargs,
+    ):
         k_fp8, k_scale = kv
         return _orig_impl(
-            q, (k_fp8, k_scale.flatten()), weights,
-            cu_seqlen_ks, cu_seqlen_ke,
+            q,
+            (k_fp8, k_scale.flatten()),
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            *args,
+            **kwargs,
         )
 
+    _fixed_fp8_mqa_logits._fl_glm_fp8_patch = True
     dg_mod._fp8_mqa_logits_impl = _fixed_fp8_mqa_logits
-    dg_mod._lazy_init = lambda: None
     logger.info("Patched fp8_mqa_logits: flatten k_scale [N,1] -> [N] "
                 "for deep_gemm 2.3.0 compat")
 
@@ -107,7 +100,7 @@ def patch_fp8_mqa_logits_dim():
 def patch_indexer_schedule_metadata():
     """Fix schedule_metadata not computed when VLLM_USE_DEEP_GEMM=0.
 
-    In vLLM 0.13.0, the indexer metadata builder gates schedule_metadata
+    Some mixed DeepGEMM/runtime combinations gate schedule_metadata
     computation behind ``is_deep_gemm_supported()`` which checks
     ``VLLM_USE_DEEP_GEMM``. But the DSA kernel (fp8_paged_mqa_logits)
     only checks ``has_deep_gemm()`` — so when VLLM_USE_DEEP_GEMM=0 and
@@ -127,6 +120,8 @@ def patch_indexer_schedule_metadata():
     from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
 
     _orig_build = DeepseekV32IndexerMetadataBuilder.build
+    if getattr(_orig_build, "_fl_glm_schedule_patch", False):
+        return
 
     def _patched_build(self, common_prefix_len, common_attn_metadata,
                        fast_build=False):
@@ -142,6 +137,7 @@ def patch_indexer_schedule_metadata():
             )
         return result
 
+    _patched_build._fl_glm_schedule_patch = True
     DeepseekV32IndexerMetadataBuilder.build = _patched_build
     logger.info("Patched indexer: schedule_metadata always computed "
                 "when deep_gemm is available")
@@ -156,7 +152,7 @@ def apply_platform_patches():
 def patch_indexer_rope_reshape():
     """Fix RoPE output shape in Indexer.forward for DSA models.
 
-    vLLM 0.13.0 uses squeeze(0) / squeeze((0, 2)) on RoPE outputs, which
+    Older Indexer implementations use squeeze(0) / squeeze((0, 2)) on RoPE outputs, which
     can fail when the RoPE implementation introduces extra leading dims.
     Replace squeeze with explicit reshape for robustness.
     """
@@ -165,6 +161,9 @@ def patch_indexer_rope_reshape():
         Indexer,
         per_token_group_quant_fp8,
     )
+
+    if getattr(Indexer.forward, "_fl_glm_rope_patch", False):
+        return
 
     def _patched_forward(self, hidden_states, qr, positions, rotary_emb):
         q, _ = self.wq_b(qr)
@@ -221,6 +220,7 @@ def patch_indexer_rope_reshape():
             self.topk_indices_buffer,
         )
 
+    _patched_forward._fl_glm_rope_patch = True
     Indexer.forward = _patched_forward
     logger.info("Patched Indexer.forward: reshape RoPE outputs to ensure "
                 "correct dims")
@@ -228,6 +228,5 @@ def patch_indexer_rope_reshape():
 
 def apply_model_patches():
     """All GLM-5 patches needed at model registration time."""
-    patch_is_deepseek_mla()
     patch_indexer_schedule_metadata()
     patch_indexer_rope_reshape()

@@ -37,7 +37,7 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
 
 ### Setup
 
-1. Install vllm from the official [v0.18.0](https://github.com/vllm-project/vllm/tree/v0.18.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
+1. Install vllm from the official [v0.18.1](https://github.com/vllm-project/vllm/tree/v0.18.1) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
 
 
 2. Install vllm-plugin-FL
