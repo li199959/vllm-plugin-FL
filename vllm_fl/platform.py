@@ -400,6 +400,10 @@ class PlatformFL(Platform):
         return True
 
     @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return cls.dist_backend == "nccl" and cls.device_type == "cuda"
+
+    @classmethod
     def pre_register_and_update(cls, parser = None) -> None:
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend

@@ -70,6 +70,16 @@ class TestPlatform0181:
         assert vllm_config.attention_config.use_trtllm_attention is False
         assert vllm_config.attention_config.disable_flashinfer_prefill is True
 
+    def test_nccl_cuda_enables_custom_collective_ops(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "dist_backend", "nccl")
+        monkeypatch.setattr(PlatformFL, "device_type", "cuda")
+        assert PlatformFL.use_custom_op_collectives() is True
+
+    def test_flagcx_disables_custom_collective_ops(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "dist_backend", "flagcx")
+        monkeypatch.setattr(PlatformFL, "device_type", "cuda")
+        assert PlatformFL.use_custom_op_collectives() is False
+
 
 class TestGlm0181Patches:
     def test_apply_model_patches_only_calls_remaining_patchers(self, monkeypatch):
