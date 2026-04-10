@@ -320,6 +320,8 @@ class PlatformFL(Platform):
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
+        if cls.device_type == "cuda":
+            return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
         return "vllm_fl.compilation.graph.GraphWrapper"
 
     @classmethod

@@ -80,6 +80,20 @@ class TestPlatform0181:
         monkeypatch.setattr(PlatformFL, "device_type", "cuda")
         assert PlatformFL.use_custom_op_collectives() is False
 
+    def test_cuda_uses_upstream_cudagraph_wrapper(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "device_type", "cuda")
+        assert (
+            PlatformFL.get_static_graph_wrapper_cls()
+            == "vllm.compilation.cuda_graph.CUDAGraphWrapper"
+        )
+
+    def test_npu_keeps_fl_graph_wrapper(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "device_type", "npu")
+        assert (
+            PlatformFL.get_static_graph_wrapper_cls()
+            == "vllm_fl.compilation.graph.GraphWrapper"
+        )
+
 
 class TestGlm0181Patches:
     def test_apply_model_patches_only_calls_remaining_patchers(self, monkeypatch):
