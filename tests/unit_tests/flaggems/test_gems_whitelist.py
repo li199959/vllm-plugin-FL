@@ -188,3 +188,17 @@ def test_get_flag_gems_whitelist_blacklist_empty_strings(monkeypatch):
     whitelist, blacklist = get_flag_gems_whitelist_blacklist()
     assert whitelist is None
     assert blacklist is None
+
+
+def test_use_flaggems_op_respects_platform_default_blacklist(monkeypatch):
+    """Platform config blacklist should disable known slow generic ops."""
+    _env_for_flaggems_enabled(monkeypatch)
+    monkeypatch.delenv("VLLM_FL_FLAGOS_WHITELIST", raising=False)
+    monkeypatch.delenv("VLLM_FL_FLAGOS_BLACKLIST", raising=False)
+
+    with patch(
+        "vllm_fl.dispatch.config.get_flagos_blacklist",
+        return_value=["index_select"],
+    ):
+        assert use_flaggems_op("index_select") is False
+        assert use_flaggems_op("silu_and_mul") is True

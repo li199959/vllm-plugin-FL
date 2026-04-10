@@ -51,7 +51,12 @@ op_backends:
     - reference
 
 # FlagOS operator blacklist
-# flagos_blacklist: []
+#
+# `index_select` is used heavily in the CUDA decode / capture path.
+# The current FlagGems implementation can be much slower there and emits
+# runtime warnings on tensor logical ops, so keep the native path by default.
+flagos_blacklist:
+  - index_select
 
 # OOT (Out-of-Tree) operator blacklist
 # oot_blacklist: []
