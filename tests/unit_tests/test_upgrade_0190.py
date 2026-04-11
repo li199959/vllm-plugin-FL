@@ -10,7 +10,7 @@ from vllm_fl.patches import glm_moe_dsa
 from vllm_fl.platform import PlatformFL
 
 
-class TestRegister0181:
+class TestRegister0190:
     def test_register_returns_platform_and_sets_spawn(self, monkeypatch):
         monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
 
@@ -30,7 +30,7 @@ class TestRegister0181:
         get_op_config.assert_called_once_with()
 
 
-class TestPlatform0181:
+class TestPlatform0190:
     def test_metax_keeps_ragged_prefill_disabled(self, monkeypatch):
         pytest.importorskip("vllm", reason="vllm not installed")
         from vllm.config import CUDAGraphMode
@@ -80,8 +80,53 @@ class TestPlatform0181:
         monkeypatch.setattr(PlatformFL, "device_type", "cuda")
         assert PlatformFL.use_custom_op_collectives() is False
 
+    def test_support_deep_gemm_on_hopper_or_blackwell_nvidia(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "vendor_name", "nvidia")
+        monkeypatch.setattr(PlatformFL, "device_type", "cuda")
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability",
+            classmethod(lambda cls, capability, device_id=0: capability == 90),
+        )
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability_family",
+            classmethod(lambda cls, capability, device_id=0: False),
+        )
 
-class TestGlm0181Patches:
+        assert PlatformFL.support_deep_gemm() is True
+
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability",
+            classmethod(lambda cls, capability, device_id=0: False),
+        )
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability_family",
+            classmethod(lambda cls, capability, device_id=0: capability == 100),
+        )
+
+        assert PlatformFL.support_deep_gemm() is True
+
+    def test_support_deep_gemm_rejects_non_nvidia_cuda(self, monkeypatch):
+        monkeypatch.setattr(PlatformFL, "vendor_name", "metax")
+        monkeypatch.setattr(PlatformFL, "device_type", "cuda")
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability",
+            classmethod(lambda cls, capability, device_id=0: True),
+        )
+        monkeypatch.setattr(
+            PlatformFL,
+            "is_device_capability_family",
+            classmethod(lambda cls, capability, device_id=0: True),
+        )
+
+        assert PlatformFL.support_deep_gemm() is False
+
+
+class TestGlm0190Patches:
     def test_apply_model_patches_only_calls_remaining_patchers(self, monkeypatch):
         schedule_patch = MagicMock()
         rope_patch = MagicMock()

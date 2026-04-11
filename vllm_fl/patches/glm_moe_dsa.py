@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.18.1.
+"""GLM-5 (GlmMoeDsa) specific patches for vLLM 0.19.0.
 
 All monkey-patches required to run GLM-5 FP8 on the current environment
 (transformers 4.57.6, CUDA 13.1, no deep_gemm JIT) are collected here.

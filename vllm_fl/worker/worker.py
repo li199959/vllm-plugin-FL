@@ -43,7 +43,7 @@ def memory_profiling_fl(
 
 
 class WorkerFL(Worker):
-    """FL worker built on top of the vLLM 0.18 GPU worker."""
+    """FL worker built on top of the vLLM 0.19 GPU worker."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

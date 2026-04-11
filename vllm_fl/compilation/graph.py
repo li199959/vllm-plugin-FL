@@ -1,14 +1,14 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.11.0/vllm/compilation/cuda_graph.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.19.0/vllm/compilation/cuda_graph.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from collections import Counter
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from unittest.mock import patch
 
 import torch
@@ -18,9 +18,15 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
@@ -60,6 +66,14 @@ class GraphOptions:
 
 
 class GraphWrapper:
+    _all_instances: ClassVar[weakref.WeakSet["GraphWrapper"]] = weakref.WeakSet()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        """Clear captured graphs from all GraphWrapper instances."""
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(self,
                  runnable: Callable,
                  vllm_config: VllmConfig,
@@ -72,6 +86,7 @@ class GraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
@@ -84,14 +99,25 @@ class GraphWrapper:
         if cudagraph_options is None:
             cudagraph_options = GraphOptions()
         self.graph_options = cudagraph_options
+        self.cudagraph_options = cudagraph_options
         # the entries for different batch descriptors that we need to capture
         # cudagraphs for.
         self.concrete_graph_entries: dict[BatchDescriptor, GraphEntry] = {}
+
+        GraphWrapper._all_instances.add(self)
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+
+        CUDAGraphWrapper._all_instances.add(self)  # type: ignore[arg-type]
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of "
+                f"cudagraph wrapper: {self._runnable_str}"
+            )
         raise AttributeError(
             f"Attribute {key} not exists in the runnable of "
             f"cudagraph wrapper: {self.runnable}"
@@ -101,7 +127,29 @@ class GraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    @property
+    def cudagraph_wrapper(self) -> "GraphWrapper":
+        return self
+
+    def clear_graphs(self) -> None:
+        self.concrete_graph_entries.clear()
+
+    @property
+    def concrete_cudagraph_entries(self) -> dict[BatchDescriptor, GraphEntry]:
+        return self.concrete_graph_entries
+
+    @concrete_cudagraph_entries.setter
+    def concrete_cudagraph_entries(
+        self, entries: dict[BatchDescriptor, GraphEntry]
+    ) -> None:
+        self.concrete_graph_entries = entries
+
     def __call__(self, *args, **kwargs):
+        if not is_forward_context_available():
+            # Encoder or setup forwards outside the normal inference path should
+            # run without static graph capture.
+            return self.runnable(*args, **kwargs)
+
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         graph_runtime_mode = forward_context.cudagraph_runtime_mode
@@ -118,6 +166,7 @@ class GraphWrapper:
             # runtime modes.
             return self.runnable(*args, **kwargs)
 
+        assert batch_descriptor is not None
         if batch_descriptor not in self.concrete_graph_entries:
             # create a new entry for this batch descriptor
             self.concrete_graph_entries[batch_descriptor] = GraphEntry(
@@ -156,22 +205,27 @@ class GraphWrapper:
                     # and disable gc for the rest of the graphs.
                     stack.enter_context(patch("gc.collect", lambda: None))
                     stack.enter_context(
-                        patch("vllm_fl.platform.PlatformFL.empty_cache", lambda: None)
+                        patch("torch.accelerator.empty_cache", lambda: None)
                     )
 
-            set_graph_pool_id(self.graph_pool)
+                if self.graph_pool is not None:
+                    set_graph_pool_id(self.graph_pool)
+                else:
+                    set_graph_pool_id(current_platform.graph_pool_handle())
 
-            # mind-exploding: carefully manage the reference and memory.
-            with current_platform.torch_device_fn.graph(graph, pool=self.graph_pool):
-                # `output` is managed by pytorch's cudagraph pool
-                output = self.runnable(*args, **kwargs)
-                if self.graph_options.weak_ref_output:
-                        # by converting it to weak ref,
-                        # the original `output` will immediately be released
-                        # to save memory. It is only safe to do this for
-                        # the last graph in piecewise cuadgraph mode, because
-                        # the output of the last graph will not be used by
-                        # any other cuda graph.
+                get_offloader().sync_prev_onload()
+
+                # mind-exploding: carefully manage the reference and memory.
+                graph_kwargs = {"pool": self.graph_pool}
+                if current_platform.device_type == "cuda":
+                    graph_kwargs["stream"] = current_stream()
+                with current_platform.torch_device_fn.graph(graph, **graph_kwargs):
+                    # `output` is managed by pytorch's cudagraph pool
+                    output = self.runnable(*args, **kwargs)
+                    get_offloader().join_after_forward()
+                    if self.graph_options.weak_ref_output:
+                        # by converting it to weak ref, the original `output`
+                        # will immediately be released to save memory.
                         output = weak_ref_tensors(output)
 
             entry.output = weak_ref_tensors(output)

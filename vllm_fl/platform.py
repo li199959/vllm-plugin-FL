@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/platforms/cuda.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.19.0/vllm/platforms/cuda.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -359,6 +359,12 @@ class PlatformFL(Platform):
         if cls.vendor_name in ["nvidia", "ascend", "metax"]:
             return True
         return False
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        if not cls.is_cuda() or cls.vendor_name != "nvidia":
+            return False
+        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
     def insert_blocks_to_device(

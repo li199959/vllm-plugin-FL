@@ -201,7 +201,7 @@ def register_model():
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
 
-    # Register BGE-M3 pooling backport for vLLM 0.13.x
+    # Register FL BGE-M3 pooling implementation.
     try:
         ModelRegistry.register_model(
             "BgeM3EmbeddingModel",

@@ -20,7 +20,7 @@ def graph_capture(device):
 
 
 class ModelRunnerFL(GPUModelRunner):
-    """FL compatibility layer backed by the vLLM 0.18 GPU model runner."""
+    """FL compatibility layer backed by the vLLM 0.19 GPU model runner."""
 
 
 __all__ = [
