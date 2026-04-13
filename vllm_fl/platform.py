@@ -164,6 +164,8 @@ class PlatformFL(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        cls._patch_linear_kernel_platform_tables()
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -228,6 +230,36 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_ragged_deepseek_prefill = False
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
+
+    @classmethod
+    def _patch_linear_kernel_platform_tables(cls) -> None:
+        """Let vLLM 0.19 linear kernel selection handle FL CUDA devices.
+
+        vLLM's FP8/INT8 linear kernel registry is keyed by PlatformEnum and
+        does not include OOT.  Keep PlatformFL as OOT so FL CustomOps continue
+        to dispatch through forward_oot/native, but alias OOT to CUDA for
+        CUDA-like devices in the linear kernel selector.
+        """
+        if cls.device_type != "cuda":
+            return
+
+        try:
+            from vllm.model_executor.kernels import linear as linear_kernels
+        except Exception as e:
+            logger.debug("Skip patching linear kernel platform tables: %s", e)
+            return
+
+        for table_name in (
+            "_POSSIBLE_INT8_KERNELS",
+            "_POSSIBLE_FP8_KERNELS",
+            "_POSSIBLE_KERNELS",
+        ):
+            table = getattr(linear_kernels, table_name, None)
+            if table is None or PlatformEnum.OOT in table:
+                continue
+            cuda_kernels = table.get(PlatformEnum.CUDA)
+            if cuda_kernels is not None:
+                table[PlatformEnum.OOT] = cuda_kernels
 
     @classmethod
     def get_attn_backend_cls(

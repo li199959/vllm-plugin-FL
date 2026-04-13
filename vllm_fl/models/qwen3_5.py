@@ -30,6 +30,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
@@ -69,9 +71,44 @@ from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
 )
 from vllm_fl.configs.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
-import vllm_fl.models.qwen3_next # for error ''_OpNamespace' 'vllm' object has no attribute 'gdn_attention_core''
 
 logger = init_logger(__name__)
+
+
+def gdn_attention_core(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name]
+    layer._forward_core(
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+    )
+
+
+def gdn_attention_core_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+if not hasattr(torch.ops.vllm, "gdn_attention_core"):
+    direct_register_custom_op(
+        op_name="gdn_attention_core",
+        op_func=gdn_attention_core,
+        mutates_args=["core_attn_out"],
+        fake_impl=gdn_attention_core_fake,
+    )
 
 
 class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):

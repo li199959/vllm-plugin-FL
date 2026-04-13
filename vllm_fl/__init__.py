@@ -131,7 +131,6 @@ def register():
 def register_model():
     """Register the FL model."""
     from vllm import ModelRegistry
-    import vllm.model_executor.models.qwen3_next as qwen3_next_module
 
     # Register Qwen3.5 MoE config
     try:
@@ -141,22 +140,8 @@ def register_model():
     except Exception as e:
         logger.error(f"Register Qwen3.5 MoE config error: {str(e)}")
 
-    # Register Qwen3Next model
-    try:
-        from vllm_fl.models.qwen3_next import Qwen3NextForCausalLM  # noqa: F401
-
-        qwen3_next_module.Qwen3NextForCausalLM = Qwen3NextForCausalLM
-        logger.warning(
-            "Qwen3NextForCausalLM has been patched to use vllm_fl.models.qwen3_next, "
-            "original vLLM implementation is overridden"
-        )
-
-        ModelRegistry.register_model(
-            "Qwen3NextForCausalLM",
-            "vllm_fl.models.qwen3_next:Qwen3NextForCausalLM"
-        )
-    except Exception as e:
-        logger.error(f"Register Qwen3Next model error: {str(e)}")
+    # vLLM 0.19 already includes Qwen3Next and registers its GDN CustomOps.
+    # Importing the FL backport here would re-register chunk_gated_delta_rule.
 
     # Register Qwen3.5 MoE model
     try:
