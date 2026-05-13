@@ -63,6 +63,10 @@ def _attach_fl_router(app) -> None:  # type: ignore[no-untyped-def]
     )
     app.include_router(_get_fl_router())
     app.state._vllm_fl_memory_profile_router_attached = True
+    logger.info(
+        "FL memory snapshot profiler route registered: "
+        "/start_mem_profile, /stop_mem_profile"
+    )
 
 
 def _patch_engine_core_client() -> None:
@@ -198,6 +202,24 @@ def _patch_openai_build_app() -> None:
     api_server.build_app = build_app
 
 
+def _patch_serve_router_registration() -> None:
+    try:
+        import vllm.entrypoints.serve as serve_entrypoints
+    except Exception:
+        return
+
+    register = serve_entrypoints.register_vllm_serve_api_routers
+    if getattr(register, "_vllm_fl_memory_profile_patched", False):
+        return
+
+    def register_vllm_serve_api_routers(app):  # type: ignore[no-untyped-def]
+        register(app)
+        _attach_fl_router(app)
+
+    register_vllm_serve_api_routers._vllm_fl_memory_profile_patched = True
+    serve_entrypoints.register_vllm_serve_api_routers = register_vllm_serve_api_routers
+
+
 def _patch_engine_protocol() -> None:
     try:
         from vllm.engine.protocol import EngineClient
@@ -230,6 +252,7 @@ def apply_memory_profile_patches() -> None:
     _patch_engine_protocol()
     _patch_async_llm()
     _patch_profile_router()
+    _patch_serve_router_registration()
     _patch_openai_build_app()
 
     _PATCHED = True
