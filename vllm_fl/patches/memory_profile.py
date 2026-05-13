@@ -13,7 +13,6 @@ from vllm_fl.worker.memory_snapshot_profiler import (
 
 logger = init_logger(__name__)
 
-_PATCHED = False
 _FL_ROUTER = None
 
 
@@ -220,6 +219,25 @@ def _patch_serve_router_registration() -> None:
     serve_entrypoints.register_vllm_serve_api_routers = register_vllm_serve_api_routers
 
 
+def _patch_fastapi_init() -> None:
+    try:
+        from fastapi import FastAPI
+    except Exception:
+        return
+
+    if getattr(FastAPI.__init__, "_vllm_fl_memory_profile_patched", False):
+        return
+
+    original_init = FastAPI.__init__
+
+    def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        original_init(self, *args, **kwargs)
+        _attach_fl_router(self)
+
+    __init__._vllm_fl_memory_profile_patched = True
+    FastAPI.__init__ = __init__
+
+
 def _patch_engine_protocol() -> None:
     try:
         from vllm.engine.protocol import EngineClient
@@ -242,10 +260,6 @@ def _patch_engine_protocol() -> None:
 
 
 def apply_memory_profile_patches() -> None:
-    global _PATCHED
-    if _PATCHED:
-        return
-
     _patch_executor()
     _patch_engine_core()
     _patch_engine_core_client()
@@ -254,5 +268,4 @@ def apply_memory_profile_patches() -> None:
     _patch_profile_router()
     _patch_serve_router_registration()
     _patch_openai_build_app()
-
-    _PATCHED = True
+    _patch_fastapi_init()
