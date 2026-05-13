@@ -50,7 +50,7 @@ from vllm.lora.request import LoRARequest
 from vllm.utils.torch_utils import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -68,6 +68,14 @@ import vllm_fl.envs as fl_envs
 from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.dispatch.io_common import managed_inference_mode
 from vllm_fl.utils import get_flag_gems_whitelist_blacklist
+from vllm_fl.worker.memory_snapshot_profiler import (
+    MemorySnapshotProfiler,
+    get_memory_profiler_dir,
+    get_memory_profiler_dump_on_exception,
+    get_memory_profiler_max_entries,
+    memory_profiler_enabled,
+    memory_snapshot_context,
+)
 
 logger = init_logger(__name__)
 
@@ -210,20 +218,22 @@ class WorkerFL(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # Torch/CUDA profiler. Enabled and configured through profiler_config.
+        # Profiler wrapper is created lazily in profile() when start is called,
+        # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "CUDA"],
+        self.profiler_config = vllm_config.profiler_config
+        if self.profiler_config.profiler not in ("torch", "cuda", None):
+            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
+        if memory_profiler_enabled():
+            self.mem_profiler: MemorySnapshotProfiler | None = MemorySnapshotProfiler(
+                output_dir=get_memory_profiler_dir(),
+                max_entries=get_memory_profiler_max_entries(),
+                dump_on_exception=get_memory_profiler_dump_on_exception(),
             )
+            self.mem_profiler.set_rank(rank)
         else:
-            self.profiler = None
+            self.mem_profiler = None
 
         logger.debug("=== ENVIRONMENT VARIABLES ===")
         for k, v in sorted(os.environ.items()):
@@ -317,6 +327,12 @@ class WorkerFL(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def _maybe_get_memory_snapshot_context(self, stage: str = "load_model"):
+        return memory_snapshot_context(
+            rank=self.rank,
+            stage=stage,
+        )
 
     def init_device(self):
         # This env var set by Ray causes exceptions with graph building.
@@ -426,7 +442,10 @@ class WorkerFL(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         ### TODO(lms): support manages a memory pool for device tensors.
-        with set_current_vllm_config(self.vllm_config):
+        with (
+            set_current_vllm_config(self.vllm_config),
+            self._maybe_get_memory_snapshot_context(stage="load_model"),
+        ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
         # with self._maybe_get_memory_pool_context(tag="weights"):
         #     self.model_runner.load_model(eep_scale_up=eep_scale_up)
@@ -454,7 +473,8 @@ class WorkerFL(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            with self._maybe_get_memory_snapshot_context(stage="profile_run"):
+                self.model_runner.profile_run()
 
             msg = (
                 f"Initial free memory {GiB(self.init_snapshot.free_memory):.2f} "
@@ -479,7 +499,9 @@ class WorkerFL(WorkerBase):
         with memory_profiling_fl(
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        ) as profile_result, self._maybe_get_memory_snapshot_context(
+            stage="profile_run"
+        ):
             self.model_runner.profile_run()
 
         self.non_torch_memory = profile_result.non_torch_increase
@@ -563,7 +585,8 @@ class WorkerFL(WorkerBase):
         #     context = allocator.use_memory_pool(tag="kv_cache")
         # else:
         #     context = nullcontext()
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        with self._maybe_get_memory_snapshot_context(stage="kv_cache"):
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> float:
         warmup_sizes = []
@@ -603,7 +626,8 @@ class WorkerFL(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._maybe_get_memory_snapshot_context(stage="cuda_graph"):
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -799,12 +823,57 @@ class WorkerFL(WorkerBase):
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler is None:
-            raise RuntimeError("Profiling is not enabled.")
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+            )
         if is_start:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+            trace_name = (
+                f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+            )
+            if self.profiler is None:
+                profiler_type = self.profiler_config.profiler
+                if profiler_type == "torch":
+                    self.profiler = TorchProfilerWrapper(
+                        self.profiler_config,
+                        worker_name=trace_name,
+                        local_rank=self.local_rank,
+                        activities=["CPU", "CUDA"],
+                    )
+                    logger.debug(
+                        "Starting torch profiler with trace name: %s", trace_name
+                    )
+                elif profiler_type == "cuda":
+                    self.profiler = CudaProfilerWrapper(self.profiler_config)
+                    logger.debug("Starting CUDA profiler")
+                else:
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
             self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
+
+    def mem_profile(self, is_start: bool = True):
+        """Start or stop PyTorch memory snapshot profiling."""
+        if self.mem_profiler is None:
+            raise RuntimeError(
+                "Memory profiling is not enabled. Set "
+                "VLLM_FL_MEMORY_PROFILER_DIR to enable the FL memory profiler."
+            )
+        if is_start:
+            self.mem_profiler.start()
+        else:
+            self.mem_profiler.stop()
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
@@ -1072,6 +1141,8 @@ class WorkerFL(WorkerBase):
             runner.ensure_kv_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
+        if self.mem_profiler is not None and self.mem_profiler.is_recording:
+            self.mem_profiler.stop(suffix="shutdown")
 
 
 def init_worker_distributed_environment(

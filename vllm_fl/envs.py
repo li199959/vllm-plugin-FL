@@ -13,6 +13,18 @@ fl_vllm_environment_variables: dict[str, Callable[[], Any]] = {
         "FLAGGEMS_ENABLE_OPLIST_PATH", "/tmp/flaggems_enable_oplist.txt"
     ),
     "USE_FLAGGEMS": use_flaggems,
+    "VLLM_FL_MEMORY_PROFILER_DIR": lambda: os.path.abspath(
+        os.path.expanduser(os.environ.get("VLLM_FL_MEMORY_PROFILER_DIR", ""))
+    ) if os.environ.get("VLLM_FL_MEMORY_PROFILER_DIR") else "",
+    "VLLM_FL_MEMORY_PROFILER_MAX_ENTRIES": lambda: int(
+        os.environ.get("VLLM_FL_MEMORY_PROFILER_MAX_ENTRIES", "100000")
+    ),
+    "VLLM_FL_MEMORY_PROFILER_PROFILE_INIT": lambda: os.environ.get(
+        "VLLM_FL_MEMORY_PROFILER_PROFILE_INIT", "1"
+    ).lower() in ("true", "1", "yes", "on"),
+    "VLLM_FL_MEMORY_PROFILER_DUMP_ON_EXCEPTION": lambda: os.environ.get(
+        "VLLM_FL_MEMORY_PROFILER_DUMP_ON_EXCEPTION", "1"
+    ).lower() in ("true", "1", "yes", "on"),
 }
 
 

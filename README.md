@@ -167,3 +167,30 @@ If you want to use the original CUDA operators, you can set the following enviro
 ```sh
 export USE_FLAGGEMS=0
 ```
+
+### Memory snapshot profiling
+
+This plugin includes an FL memory snapshot profiler based on
+vLLM PR [#30580](https://github.com/vllm-project/vllm/pull/30580), so it can be
+used with vLLM versions where that PR has not been merged. It records
+PyTorch allocation history and writes `.pickle` snapshots that can be opened at
+https://pytorch.org/memory_viz.
+
+Enable it with FL plugin environment variables before starting vLLM:
+
+```sh
+export VLLM_FL_MEMORY_PROFILER_DIR=/tmp/vllm-memory-snapshots
+# Optional:
+export VLLM_FL_MEMORY_PROFILER_MAX_ENTRIES=100000
+export VLLM_FL_MEMORY_PROFILER_PROFILE_INIT=1
+export VLLM_FL_MEMORY_PROFILER_DUMP_ON_EXCEPTION=1
+```
+
+When enabled, initialization snapshots are emitted for `load_model`,
+`profile_run`, `kv_cache`, and `cuda_graph`. In serving mode the plugin also
+adds FL-owned endpoints:
+
+```sh
+curl -X POST http://localhost:8000/start_mem_profile
+curl -X POST http://localhost:8000/stop_mem_profile
+```

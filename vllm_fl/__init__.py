@@ -47,6 +47,9 @@ def register():
     """Register the FL platform."""
     _patch_transformers_compat()
 
+    from vllm_fl.patches.memory_profile import apply_memory_profile_patches
+    apply_memory_profile_patches()
+
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
     glm5_platform()
@@ -73,6 +76,9 @@ def register_router():
 def register_model():
     """Register FL-specific models not yet upstream."""
     _register_flagcx_connector()
+
+    from vllm_fl.patches.memory_profile import apply_memory_profile_patches
+    apply_memory_profile_patches()
 
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
