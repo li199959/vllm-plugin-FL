@@ -14,6 +14,55 @@ from vllm_fl.worker.memory_snapshot_profiler import (
 logger = init_logger(__name__)
 
 _PATCHED = False
+_FL_ROUTER = None
+
+
+def _engine_client(request):  # type: ignore[no-untyped-def]
+    return request.app.state.engine_client
+
+
+def _get_fl_router():
+    global _FL_ROUTER
+    if _FL_ROUTER is not None:
+        return _FL_ROUTER
+
+    from fastapi import APIRouter
+    from fastapi.responses import Response
+
+    router = APIRouter()
+
+    @router.post("/start_mem_profile")
+    async def start_mem_profile(raw_request):  # type: ignore[no-untyped-def]
+        logger.info("Starting FL memory snapshot profiler...")
+        await _engine_client(raw_request).start_mem_profile()
+        logger.info("FL memory snapshot profiler started.")
+        return Response(status_code=200)
+
+    @router.post("/stop_mem_profile")
+    async def stop_mem_profile(raw_request):  # type: ignore[no-untyped-def]
+        logger.info("Stopping FL memory snapshot profiler...")
+        await _engine_client(raw_request).stop_mem_profile()
+        logger.info("FL memory snapshot profiler stopped. Snapshots saved.")
+        return Response(status_code=200)
+
+    _FL_ROUTER = router
+    return router
+
+
+def _attach_fl_router(app) -> None:  # type: ignore[no-untyped-def]
+    if not memory_profiler_enabled():
+        return
+    if getattr(app.state, "_vllm_fl_memory_profile_router_attached", False):
+        return
+
+    logger.warning_once(
+        "FL memory snapshot profiler is enabled in the API server. "
+        "Snapshots will be saved to '%s'. "
+        "This should ONLY be used for local development!",
+        get_memory_profiler_dir(),
+    )
+    app.include_router(_get_fl_router())
+    app.state._vllm_fl_memory_profile_router_attached = True
 
 
 def _patch_engine_core_client() -> None:
@@ -112,8 +161,6 @@ def _patch_async_llm() -> None:
 
 def _patch_profile_router() -> None:
     try:
-        from fastapi import APIRouter
-        from fastapi.responses import Response
         from vllm.entrypoints.serve.profile import api_router
     except Exception:
         return
@@ -121,41 +168,34 @@ def _patch_profile_router() -> None:
     if getattr(api_router.attach_router, "_vllm_fl_memory_profile_patched", False):
         return
 
-    fl_router = APIRouter()
-
-    @fl_router.post("/start_mem_profile")
-    async def start_mem_profile(raw_request):  # type: ignore[no-untyped-def]
-        logger.info("Starting FL memory snapshot profiler...")
-        await api_router.engine_client(raw_request).start_mem_profile()
-        logger.info("FL memory snapshot profiler started.")
-        return Response(status_code=200)
-
-    @fl_router.post("/stop_mem_profile")
-    async def stop_mem_profile(raw_request):  # type: ignore[no-untyped-def]
-        logger.info("Stopping FL memory snapshot profiler...")
-        await api_router.engine_client(raw_request).stop_mem_profile()
-        logger.info("FL memory snapshot profiler stopped. Snapshots saved.")
-        return Response(status_code=200)
-
     original_attach_router = api_router.attach_router
 
     def attach_router(app):  # type: ignore[no-untyped-def]
         original_attach_router(app)
-        if memory_profiler_enabled():
-            if getattr(app.state, "_vllm_fl_memory_profile_router_attached", False):
-                return
-            logger.warning_once(
-                "FL memory snapshot profiler is enabled in the API server. "
-                "Snapshots will be saved to '%s'. "
-                "This should ONLY be used for local development!",
-                get_memory_profiler_dir(),
-            )
-            app.include_router(fl_router)
-            app.state._vllm_fl_memory_profile_router_attached = True
-            return
+        _attach_fl_router(app)
 
     attach_router._vllm_fl_memory_profile_patched = True
     api_router.attach_router = attach_router
+
+
+def _patch_openai_build_app() -> None:
+    try:
+        from vllm.entrypoints.openai import api_server
+    except Exception:
+        return
+
+    if getattr(api_server.build_app, "_vllm_fl_memory_profile_patched", False):
+        return
+
+    original_build_app = api_server.build_app
+
+    def build_app(*args, **kwargs):  # type: ignore[no-untyped-def]
+        app = original_build_app(*args, **kwargs)
+        _attach_fl_router(app)
+        return app
+
+    build_app._vllm_fl_memory_profile_patched = True
+    api_server.build_app = build_app
 
 
 def _patch_engine_protocol() -> None:
@@ -190,5 +230,6 @@ def apply_memory_profile_patches() -> None:
     _patch_engine_protocol()
     _patch_async_llm()
     _patch_profile_router()
+    _patch_openai_build_app()
 
     _PATCHED = True

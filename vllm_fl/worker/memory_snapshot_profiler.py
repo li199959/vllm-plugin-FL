@@ -10,8 +10,9 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -80,12 +81,11 @@ def memory_profiler_enabled() -> bool:
     return get_memory_profiler_settings().enabled
 
 
-def _torch_device_fn():
-    return current_platform.torch_device_fn
-
-
 def _memory_module():
-    return getattr(_torch_device_fn(), "memory", None)
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None:
+        return None
+    return getattr(cuda, "memory", None)
 
 
 def _require_memory_snapshot_support() -> Any:
@@ -104,7 +104,10 @@ def _require_memory_snapshot_support() -> Any:
 
 
 def _call_if_available(name: str) -> None:
-    fn = getattr(_torch_device_fn(), name, None)
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None:
+        return
+    fn = getattr(cuda, name, None)
     if fn is None:
         return
     try:
