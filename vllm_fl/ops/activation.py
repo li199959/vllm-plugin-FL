@@ -2,7 +2,12 @@
 
 import torch
 from vllm.model_executor.layers.activation import SiluAndMul, GeluAndMul
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import CachedOp
+
+# Module-level cached op handles: one fn lookup per op_name across all
+# instances of the layer.  Refresh is driven by policy_epoch inside CachedOp.
+_silu_and_mul = CachedOp("silu_and_mul")
+_gelu_and_mul = CachedOp("gelu_and_mul")
 
 
 class SiluAndMulFL(SiluAndMul):
@@ -10,7 +15,7 @@ class SiluAndMulFL(SiluAndMul):
         super().__init__()
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        return call_op("silu_and_mul", self, x)
+        return _silu_and_mul(self, x)
 
 
 class GeluAndMulFL(GeluAndMul):
@@ -18,7 +23,7 @@ class GeluAndMulFL(GeluAndMul):
         super().__init__(approximate=approximate)
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        return call_op("gelu_and_mul", self, x)
+        return _gelu_and_mul(self, x)
 
 
 __all__ = ["SiluAndMulFL", "GeluAndMulFL"]

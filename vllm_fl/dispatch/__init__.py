@@ -76,6 +76,8 @@ Configuration File (YAML):
             - reference
 """
 
+import os
+
 from .types import OpImpl, BackendImplKind, BackendPriority, match_token
 from .registry import OpRegistry, OpRegistrySnapshot
 from .policy import (
@@ -139,6 +141,55 @@ def resolve_op(op_name: str):
     return get_default_manager().resolve(op_name)
 
 
+# Fast-path opt-out: set VLLM_FL_OP_FAST_PATH=0 to disable per-op fn caching
+# in OOT layers and route every call back through OpManager.call (preserves
+# fallback + IO dump hooks).
+_OP_FAST_PATH_ENABLED = os.environ.get("VLLM_FL_OP_FAST_PATH", "1") == "1"
+
+
+class CachedOp:
+    """Resolve an op's implementation once and cache it on the calling site.
+
+    Wraps ``OpManager.resolve`` (which itself caches by policy/epoch) so that
+    hot-path layers can avoid the per-call overhead of ``OpManager.call``
+    (fallback machinery + dump hooks).  The cached fn is refreshed
+    automatically whenever ``policy_epoch`` is bumped (e.g. policy change
+    or fork), so external invalidation paths still work.
+
+    When ``VLLM_FL_OP_FAST_PATH=0`` the wrapper transparently degrades to
+    ``OpManager.call`` so that fallback and IO dump are preserved.
+
+    Attributes are kept in ``__slots__`` so each instance is ~64 bytes.
+    """
+
+    __slots__ = ("_op_name", "_fn", "_epoch", "_manager")
+
+    def __init__(self, op_name: str) -> None:
+        self._op_name = op_name
+        self._fn = None
+        self._epoch = -1
+        self._manager = None
+
+    def __call__(self, *args, **kwargs):
+        if not _OP_FAST_PATH_ENABLED:
+            # Slow path preserves fallback + dump hooks.
+            return get_default_manager().call(self._op_name, *args, **kwargs)
+
+        mgr = self._manager
+        if mgr is None:
+            mgr = get_default_manager()
+            self._manager = mgr
+
+        cur_epoch = mgr._state.policy_epoch
+        fn = self._fn
+        if fn is None or self._epoch != cur_epoch:
+            fn = mgr.resolve(self._op_name)
+            self._fn = fn
+            self._epoch = cur_epoch
+
+        return fn(*args, **kwargs)
+
+
 __all__ = [
     # Types
     "OpImpl",
@@ -188,4 +239,5 @@ __all__ = [
     # Convenience functions
     "call_op",
     "resolve_op",
+    "CachedOp",
 ]
