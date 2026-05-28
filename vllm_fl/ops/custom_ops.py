@@ -90,3 +90,13 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
         if current_platform.device_type == "ptpu":
             from vllm_fl.dispatch.backends.vendor.sunrise.patch import apply_sunrise_patches
             apply_sunrise_patches()
+
+    # DSA-CP: register MLA wrapper replacement when enabled via env var
+    from vllm_fl.dsa_cp import dsa_cp_env_enabled
+    if dsa_cp_env_enabled():
+        from vllm_fl.dsa_cp.mla_wrapper import DSACPMultiHeadLatentAttentionWrapper
+        PluggableLayer.register_oot(
+            _decorated_layer_cls=DSACPMultiHeadLatentAttentionWrapper,
+            name="MultiHeadLatentAttentionWrapper",
+        )
+        logger.info("Registered DSA-CP MLA wrapper")
