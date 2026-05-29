@@ -31,6 +31,7 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     _logged_enabled = False
     _logged_disabled = False
     _logged_layer_sharding = False
+    _logged_a_proj_active = False
 
     def __init__(
         self,
@@ -99,6 +100,21 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                     self.cuda_dsa_cp_mode,
                 )
                 CudaDSACPMultiHeadLatentAttentionWrapper._logged_enabled = True
+            if (
+                self.cuda_dsa_cp_a_proj_active
+                and self.cuda_dsa_cp_tp_rank == 0
+                and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_a_proj_active
+            ):
+                logger.warning(
+                    "CUDA DSA-CP a_proj ACTIVE: prefix=%s, tp_rank=%s/%s, "
+                    "q_lora_rank=%s, kv_lora_rank=%s.",
+                    prefix,
+                    self.cuda_dsa_cp_tp_rank,
+                    self.cuda_dsa_cp_tp_size,
+                    self.q_lora_rank,
+                    self.kv_lora_rank,
+                )
+                CudaDSACPMultiHeadLatentAttentionWrapper._logged_a_proj_active = True
             if (
                 self.cuda_dsa_cp_layer_sharding
                 and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_layer_sharding
