@@ -76,6 +76,10 @@ def cuda_dsa_cp_enabled(vllm_config: Any | None = None) -> bool:
     if "enable_flashcomm1" in additional_config:
         return _as_bool(additional_config.get("enable_flashcomm1"))
 
+    env_value = os.environ.get("FL_ENABLE_DSA_CP")
+    if env_value is not None:
+        return _as_bool(env_value)
+
     env_value = os.environ.get("VLLM_FL_ENABLE_DSA_CP")
     if env_value is not None:
         return _as_bool(env_value)
@@ -94,6 +98,8 @@ def cuda_dsa_cp_mode(vllm_config: Any | None = None) -> str:
 
     additional_config = _additional_config(vllm_config)
     value = additional_config.get("dsa_cp_mode")
+    if value is None:
+        value = os.environ.get("FL_DSA_CP_MODE")
     if value is None:
         value = os.environ.get("VLLM_FL_DSA_CP_MODE", "safe")
     return str(value).strip().lower()
