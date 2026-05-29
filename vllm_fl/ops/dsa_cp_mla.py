@@ -14,14 +14,9 @@ import logging
 
 import torch
 from vllm.config import get_current_vllm_config_or_none
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 
 from vllm_fl.ops.dsa_cp import (
-    build_token_plan,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_layer_sharding,
     cuda_dsa_cp_mode,
@@ -110,22 +105,4 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.cuda_dsa_cp_enabled and self.cuda_dsa_cp_mode == "safe":
-            tp_size = get_tensor_model_parallel_world_size()
-            if tp_size > 1:
-                plan = build_token_plan(
-                    num_tokens=hidden_states.shape[0],
-                    world_size=tp_size,
-                    rank=get_tensor_model_parallel_rank(),
-                )
-                logger.debug(
-                    "CUDA DSA-CP token plan for %s: rank=%d/%d local=[%d,%d) padded_end=%d",
-                    self.prefix,
-                    plan.rank,
-                    plan.world_size,
-                    plan.local_start,
-                    plan.local_end,
-                    plan.local_end_with_pad,
-                )
-
         return super().forward(positions, hidden_states, llama_4_scaling)
