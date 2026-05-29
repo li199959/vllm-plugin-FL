@@ -260,6 +260,7 @@ OOT_OP_NAMES = [
     "rotary_embedding",
     "fused_moe",
     "unquantized_fused_moe_method",
+    "cuda_dsa_cp_mla",
 ]
 
 

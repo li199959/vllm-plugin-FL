@@ -8,6 +8,7 @@ from .layernorm import *  # noqa F403 F401
 from .activation import *  # noqa F403 F401
 from .rotary_embedding import *  # noqa F403 F401
 from .fused_moe import *  # noqa F403 F401
+from .dsa_cp_mla import CudaDSACPMultiHeadLatentAttentionWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ OOT_OPS = {
     "unquantized_fused_moe_method": (
         UnquantizedFusedMoEMethodFL,  # noqa F405
         "UnquantizedFusedMoEMethod",
+    ),
+    "cuda_dsa_cp_mla": (
+        CudaDSACPMultiHeadLatentAttentionWrapper,
+        "MultiHeadLatentAttentionWrapper",
     ),
 }
 
