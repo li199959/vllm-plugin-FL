@@ -169,7 +169,13 @@ class GroupedTopKRouterFL(GroupedTopKRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self._valid_grouping(router_logits):
+        def valid_grouping() -> bool:
+            num_experts = router_logits.shape[-1]
+            if num_experts <= self.num_expert_group:
+                return False
+            return num_experts % self.num_expert_group == 0
+
+        if not valid_grouping():
             if self.e_score_correction_bias is not None:
                 topk_weights, topk_ids = fused_topk_bias(
                     hidden_states=hidden_states,
