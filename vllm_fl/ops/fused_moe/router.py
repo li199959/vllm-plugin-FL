@@ -161,6 +161,12 @@ def _fl_grouped_topk(
 class GroupedTopKRouterFL(GroupedTopKRouter):
     """FL router that routes grouped_topk through call_op."""
 
+    def _valid_grouping(self, router_logits: torch.Tensor) -> bool:
+        num_experts = router_logits.shape[-1]
+        if num_experts <= self.num_expert_group:
+            return False
+        return num_experts % self.num_expert_group == 0
+
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
