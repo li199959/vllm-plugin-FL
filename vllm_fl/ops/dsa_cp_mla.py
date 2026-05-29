@@ -8,7 +8,7 @@ import logging
 from types import MethodType
 
 import torch
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -119,6 +119,7 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     _logged_layer_sharding = False
     _logged_a_proj_active = False
     _logged_indexer_proj_active = False
+    _logged_indexer_proj_cudagraph_skip = False
     _inspected_prefixes: set[str] = set()
 
     def __init__(
@@ -180,6 +181,16 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             and self.cuda_dsa_cp_tp_size > 1
             and self.indexer is not None
         )
+        self.cuda_dsa_cp_indexer_proj_skip_reason = None
+
+        if (
+            self.cuda_dsa_cp_indexer_proj_active
+            and self._cuda_graph_capture_enabled(self.vllm_config)
+        ):
+            self.cuda_dsa_cp_indexer_proj_active = False
+            self.cuda_dsa_cp_indexer_proj_skip_reason = (
+                "CUDA graph capture is enabled"
+            )
 
         if self.cuda_dsa_cp_enabled and not self.cuda_dsa_cp_sparse_model:
             logger.warning(
@@ -253,15 +264,29 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_proj_modes()
                 and not self.cuda_dsa_cp_indexer_proj_active
             ):
-                logger.warning(
-                    "CUDA DSA-CP indexer_proj mode is enabled for %s but cannot "
-                    "activate (sparse=%s, tp_size=%s, indexer=%s). Falling back "
-                    "to vLLM native sparse indexer execution.",
-                    prefix,
-                    self.cuda_dsa_cp_sparse_model,
-                    self.cuda_dsa_cp_tp_size,
-                    self.indexer is not None,
-                )
+                if self.cuda_dsa_cp_indexer_proj_skip_reason is not None:
+                    if (
+                        self.cuda_dsa_cp_tp_rank == 0
+                        and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_indexer_proj_cudagraph_skip
+                    ):
+                        logger.warning(
+                            "CUDA DSA-CP indexer_proj mode is enabled, but %s. "
+                            "Keeping CUDA graphs enabled and falling back to "
+                            "vLLM native sparse indexer execution. Use "
+                            "--enforce-eager only when validating indexer_proj.",
+                            self.cuda_dsa_cp_indexer_proj_skip_reason,
+                        )
+                        CudaDSACPMultiHeadLatentAttentionWrapper._logged_indexer_proj_cudagraph_skip = True
+                else:
+                    logger.warning(
+                        "CUDA DSA-CP indexer_proj mode is enabled for %s but cannot "
+                        "activate (sparse=%s, tp_size=%s, indexer=%s). Falling back "
+                        "to vLLM native sparse indexer execution.",
+                        prefix,
+                        self.cuda_dsa_cp_sparse_model,
+                        self.cuda_dsa_cp_tp_size,
+                        self.indexer is not None,
+                    )
             if self.cuda_dsa_cp_inspect and self.cuda_dsa_cp_tp_rank == 0:
                 self._log_phase2_inspection(prefix)
         elif not CudaDSACPMultiHeadLatentAttentionWrapper._logged_disabled:
@@ -278,6 +303,25 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             return int(suffix.split(".", 1)[0])
         except ValueError:
             return None
+
+    @staticmethod
+    def _cuda_graph_capture_enabled(vllm_config) -> bool:
+        if vllm_config is None:
+            return False
+
+        if getattr(vllm_config, "enforce_eager", False):
+            return False
+
+        model_config = getattr(vllm_config, "model_config", None)
+        if getattr(model_config, "enforce_eager", False):
+            return False
+
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        if compilation_config is None:
+            return False
+
+        cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+        return cudagraph_mode is not None and cudagraph_mode != CUDAGraphMode.NONE
 
     @staticmethod
     def _module_summary(name: str, module: torch.nn.Module | None) -> str:
