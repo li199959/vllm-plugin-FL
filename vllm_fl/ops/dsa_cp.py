@@ -2,10 +2,9 @@
 
 """Experimental CUDA DSA-CP helpers.
 
-This module intentionally keeps the first CUDA implementation conservative:
-it wires the feature flag, validates that we are on a sparse MLA model, and
-exposes token-shard planning without changing cache semantics yet. The actual
-attention computation continues to use vLLM's FlashMLA sparse backend.
+This module intentionally keeps the CUDA implementation conservative: a_proj
+mode token-shards DeepSeek MLA's replicated A-proj while leaving attention
+metadata, KV cache layout, and sparse FlashMLA execution unchanged.
 """
 
 from __future__ import annotations
