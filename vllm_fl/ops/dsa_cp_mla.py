@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+from types import MethodType
 
 import torch
 from vllm.config import get_current_vllm_config_or_none
@@ -14,9 +15,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 
 from vllm_fl.ops.dsa_cp import (
+    cuda_dsa_cp_a_proj_modes,
     cuda_dsa_cp_enabled,
+    cuda_dsa_cp_indexer_proj_modes,
     cuda_dsa_cp_inspect,
     cuda_dsa_cp_inspect_layers,
     cuda_dsa_cp_layer_sharding,
@@ -27,6 +33,84 @@ from vllm_fl.ops.dsa_cp import (
 logger = logging.getLogger(__name__)
 
 
+def _pad_first_dim(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
+    if tensor.shape[0] >= target_size:
+        return tensor
+    padding = tensor.new_empty((target_size - tensor.shape[0], *tensor.shape[1:]))
+    return torch.cat((tensor, padding), dim=0)
+
+
+def _cuda_dsa_cp_indexer_proj_forward(
+    self,
+    hidden_states: torch.Tensor,
+    qr: torch.Tensor,
+    positions: torch.Tensor,
+    rotary_emb,
+) -> torch.Tensor:
+    num_tokens = hidden_states.shape[0]
+    tp_size = self._cuda_dsa_cp_tp_size
+    tp_rank = self._cuda_dsa_cp_tp_rank
+    if num_tokens == 0 or tp_size <= 1:
+        return self._cuda_dsa_cp_original_forward(
+            hidden_states, qr, positions, rotary_emb
+        )
+
+    tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
+    local_start = tp_rank * tokens_per_rank
+    local_end = min(local_start + tokens_per_rank, num_tokens)
+
+    local_hidden_states = hidden_states[local_start:local_end]
+    local_qr = qr[local_start:local_end]
+    local_positions = positions[local_start:local_end]
+
+    q, _ = self.wq_b(local_qr)
+    q = q.view(-1, self.n_head, self.head_dim)
+    q_pe, q_nope = torch.split(
+        q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+    )
+
+    kw, _ = self.wk_weights_proj(local_hidden_states)
+    k = kw[:, : self.head_dim]
+    weights = kw[:, self.head_dim :]
+
+    k = self.k_norm(k)
+    k_pe, k_nope = torch.split(
+        k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+    )
+
+    q_pe, k_pe = rotary_emb(local_positions, q_pe, k_pe.unsqueeze(1))
+    q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+    k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+    q = torch.cat([q_pe, q_nope], dim=-1)
+    k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+
+    q = _pad_first_dim(q, tokens_per_rank)
+    k = _pad_first_dim(k, tokens_per_rank)
+    weights = _pad_first_dim(weights, tokens_per_rank)
+
+    q = tensor_model_parallel_all_gather(q, dim=0)[:num_tokens]
+    k = tensor_model_parallel_all_gather(k, dim=0)[:num_tokens]
+    weights = tensor_model_parallel_all_gather(weights, dim=0)[:num_tokens]
+
+    q = q.view(-1, self.head_dim)
+    q_fp8, q_scale = per_token_group_quant_fp8(
+        q,
+        self.quant_block_size,
+        column_major_scales=False,
+        use_ue8m0=self.scale_fmt is not None,
+    )
+    q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
+    q_scale = q_scale.view(-1, self.n_head, 1)
+
+    weights = (
+        weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+    )
+    weights = weights.squeeze(-1)
+
+    return self.indexer_op(hidden_states, q_fp8, k, weights)
+
+
 class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Drop-in MLA wrapper with CUDA DSA-CP feature gating."""
 
@@ -34,6 +118,7 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     _logged_disabled = False
     _logged_layer_sharding = False
     _logged_a_proj_active = False
+    _logged_indexer_proj_active = False
     _inspected_prefixes: set[str] = set()
 
     def __init__(
@@ -82,11 +167,18 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self.cuda_dsa_cp_tp_rank = get_tensor_model_parallel_rank()
         self.cuda_dsa_cp_a_proj_active = (
             self.cuda_dsa_cp_enabled
-            and self.cuda_dsa_cp_mode == "a_proj"
+            and self.cuda_dsa_cp_mode in cuda_dsa_cp_a_proj_modes()
             and self.cuda_dsa_cp_sparse_model
             and self.cuda_dsa_cp_tp_size > 1
             and self.q_lora_rank is not None
             and self.fused_qkv_a_proj is not None
+        )
+        self.cuda_dsa_cp_indexer_proj_active = (
+            self.cuda_dsa_cp_enabled
+            and self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_proj_modes()
+            and self.cuda_dsa_cp_sparse_model
+            and self.cuda_dsa_cp_tp_size > 1
+            and self.indexer is not None
         )
 
         if self.cuda_dsa_cp_enabled and not self.cuda_dsa_cp_sparse_model:
@@ -120,6 +212,22 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                     self.kv_lora_rank,
                 )
                 CudaDSACPMultiHeadLatentAttentionWrapper._logged_a_proj_active = True
+            if self.cuda_dsa_cp_indexer_proj_active:
+                self._patch_indexer_proj_token_parallel()
+            if (
+                self.cuda_dsa_cp_indexer_proj_active
+                and self.cuda_dsa_cp_tp_rank == 0
+                and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_indexer_proj_active
+            ):
+                logger.warning(
+                    "CUDA DSA-CP indexer_proj ACTIVE: prefix=%s, tp_rank=%s/%s. "
+                    "The indexer projection GEMMs are token-sharded; native sparse "
+                    "indexer metadata and FlashMLA execution are preserved.",
+                    prefix,
+                    self.cuda_dsa_cp_tp_rank,
+                    self.cuda_dsa_cp_tp_size,
+                )
+                CudaDSACPMultiHeadLatentAttentionWrapper._logged_indexer_proj_active = True
             if (
                 self.cuda_dsa_cp_layer_sharding
                 and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_layer_sharding
@@ -140,6 +248,19 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                     self.cuda_dsa_cp_tp_size,
                     self.q_lora_rank,
                     self.fused_qkv_a_proj is not None,
+                )
+            if (
+                self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_proj_modes()
+                and not self.cuda_dsa_cp_indexer_proj_active
+            ):
+                logger.warning(
+                    "CUDA DSA-CP indexer_proj mode is enabled for %s but cannot "
+                    "activate (sparse=%s, tp_size=%s, indexer=%s). Falling back "
+                    "to vLLM native sparse indexer execution.",
+                    prefix,
+                    self.cuda_dsa_cp_sparse_model,
+                    self.cuda_dsa_cp_tp_size,
+                    self.indexer is not None,
                 )
             if self.cuda_dsa_cp_inspect and self.cuda_dsa_cp_tp_rank == 0:
                 self._log_phase2_inspection(prefix)
@@ -255,6 +376,19 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         qkv_lora = tensor_model_parallel_all_gather(local_qkv_lora, dim=0)
         return qkv_lora[:num_tokens]
+
+    def _patch_indexer_proj_token_parallel(self) -> None:
+        indexer = self.indexer
+        if indexer is None or getattr(
+            indexer, "_cuda_dsa_cp_indexer_proj_patched", False
+        ):
+            return
+
+        indexer._cuda_dsa_cp_tp_size = self.cuda_dsa_cp_tp_size
+        indexer._cuda_dsa_cp_tp_rank = self.cuda_dsa_cp_tp_rank
+        indexer._cuda_dsa_cp_original_forward = indexer.forward
+        indexer.forward = MethodType(_cuda_dsa_cp_indexer_proj_forward, indexer)
+        indexer._cuda_dsa_cp_indexer_proj_patched = True
 
     def forward(
         self,

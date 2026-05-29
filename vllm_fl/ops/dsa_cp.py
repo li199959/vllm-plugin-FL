@@ -93,7 +93,9 @@ def cuda_dsa_cp_mode(vllm_config: Any | None = None) -> str:
     """Return the CUDA DSA-CP mode.
 
     ``safe`` is the initial mode: enable validation and telemetry while using
-    vLLM's native sparse MLA execution for correctness.
+    vLLM's native sparse MLA execution for correctness. ``a_proj`` token-shards
+    the replicated MLA A projection. ``indexer_proj`` token-shards the sparse
+    indexer projection GEMMs while preserving native sparse indexer metadata.
     """
 
     additional_config = _additional_config(vllm_config)
@@ -103,6 +105,14 @@ def cuda_dsa_cp_mode(vllm_config: Any | None = None) -> str:
     if value is None:
         value = os.environ.get("VLLM_FL_DSA_CP_MODE", "safe")
     return str(value).strip().lower()
+
+
+def cuda_dsa_cp_a_proj_modes() -> set[str]:
+    return {"a_proj", "a_proj_indexer", "a_proj_indexer_proj"}
+
+
+def cuda_dsa_cp_indexer_proj_modes() -> set[str]:
+    return {"indexer_proj", "a_proj_indexer", "a_proj_indexer_proj"}
 
 
 def cuda_dsa_cp_layer_sharding(vllm_config: Any | None = None) -> list[str]:
