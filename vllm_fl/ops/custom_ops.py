@@ -99,4 +99,4 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
             _decorated_layer_cls=DSACPMultiHeadLatentAttentionWrapper,
             name="MultiHeadLatentAttentionWrapper",
         )
-        logger.info("Registered DSA-CP MLA wrapper")
+        logger.warning("DSA-CP MLA wrapper registered and active")
