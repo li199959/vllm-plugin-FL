@@ -118,6 +118,40 @@ def cuda_dsa_cp_layer_sharding(vllm_config: Any | None = None) -> list[str]:
     return []
 
 
+def cuda_dsa_cp_inspect(vllm_config: Any | None = None) -> bool:
+    """Return whether to log MLA module details for phase-2 planning."""
+
+    additional_config = _additional_config(vllm_config)
+    if "dsa_cp_inspect" in additional_config:
+        return _as_bool(additional_config.get("dsa_cp_inspect"))
+
+    env_value = os.environ.get("FL_DSA_CP_INSPECT")
+    if env_value is not None:
+        return _as_bool(env_value)
+
+    return _as_bool(os.environ.get("VLLM_FL_DSA_CP_INSPECT"))
+
+
+def cuda_dsa_cp_inspect_layers(vllm_config: Any | None = None) -> int:
+    """Return how many layer prefixes to inspect; -1 means all layers."""
+
+    additional_config = _additional_config(vllm_config)
+    value = additional_config.get("dsa_cp_inspect_layers")
+    if value is None:
+        value = os.environ.get("FL_DSA_CP_INSPECT_LAYERS")
+    if value is None:
+        value = os.environ.get("VLLM_FL_DSA_CP_INSPECT_LAYERS", "2")
+
+    value_str = str(value).strip().lower()
+    if value_str == "all":
+        return -1
+    try:
+        return max(0, int(value_str))
+    except ValueError:
+        _warning_once("Ignoring invalid dsa_cp_inspect_layers value: %r", value)
+        return 2
+
+
 def is_sparse_mla_model(vllm_config: Any | None) -> bool:
     if vllm_config is None:
         return False

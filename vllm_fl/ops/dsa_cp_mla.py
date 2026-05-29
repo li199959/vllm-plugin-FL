@@ -17,6 +17,8 @@ from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionW
 
 from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_enabled,
+    cuda_dsa_cp_inspect,
+    cuda_dsa_cp_inspect_layers,
     cuda_dsa_cp_layer_sharding,
     cuda_dsa_cp_mode,
     is_sparse_mla_model,
@@ -32,6 +34,7 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     _logged_disabled = False
     _logged_layer_sharding = False
     _logged_a_proj_active = False
+    _inspected_prefixes: set[str] = set()
 
     def __init__(
         self,
@@ -67,6 +70,8 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.cuda_dsa_cp_enabled = cuda_dsa_cp_enabled(self.vllm_config)
         self.cuda_dsa_cp_mode = cuda_dsa_cp_mode(self.vllm_config)
         self.cuda_dsa_cp_layer_sharding = cuda_dsa_cp_layer_sharding(self.vllm_config)
+        self.cuda_dsa_cp_inspect = cuda_dsa_cp_inspect(self.vllm_config)
+        self.cuda_dsa_cp_inspect_layers = cuda_dsa_cp_inspect_layers(self.vllm_config)
         self.cuda_dsa_cp_sparse_model = bool(
             mla_modules.is_sparse
         ) or is_sparse_mla_model(self.vllm_config)
@@ -136,9 +141,95 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                     self.q_lora_rank,
                     self.fused_qkv_a_proj is not None,
                 )
+            if self.cuda_dsa_cp_inspect and self.cuda_dsa_cp_tp_rank == 0:
+                self._log_phase2_inspection(prefix)
         elif not CudaDSACPMultiHeadLatentAttentionWrapper._logged_disabled:
             logger.debug("CUDA DSA-CP wrapper registered but disabled.")
             CudaDSACPMultiHeadLatentAttentionWrapper._logged_disabled = True
+
+    @staticmethod
+    def _layer_index_from_prefix(prefix: str) -> int | None:
+        marker = ".layers."
+        if marker not in prefix:
+            return None
+        suffix = prefix.split(marker, 1)[1]
+        try:
+            return int(suffix.split(".", 1)[0])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _module_summary(name: str, module: torch.nn.Module | None) -> str:
+        if module is None:
+            return f"{name}=None"
+
+        params = []
+        for param_name, param in module.named_parameters(recurse=True):
+            params.append(f"{param_name}{tuple(param.shape)}")
+            if len(params) >= 4:
+                break
+        if not params:
+            params.append("no_params")
+
+        attrs = []
+        for attr_name in (
+            "input_size",
+            "output_size",
+            "output_partition_sizes",
+            "gather_output",
+            "skip_bias_add",
+            "tp_size",
+        ):
+            if hasattr(module, attr_name):
+                attrs.append(f"{attr_name}={getattr(module, attr_name)}")
+
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is not None:
+            attrs.append(f"quant={quant_method.__class__.__name__}")
+
+        attr_text = ", ".join(attrs) if attrs else "attrs=none"
+        return (
+            f"{name}={module.__class__.__name__}"
+            f"(params=[{'; '.join(params)}], {attr_text})"
+        )
+
+    def _log_phase2_inspection(self, prefix: str) -> None:
+        layer_idx = self._layer_index_from_prefix(prefix)
+        if self.cuda_dsa_cp_inspect_layers >= 0:
+            if layer_idx is not None and layer_idx >= self.cuda_dsa_cp_inspect_layers:
+                return
+            if (
+                layer_idx is None
+                and len(CudaDSACPMultiHeadLatentAttentionWrapper._inspected_prefixes)
+                >= self.cuda_dsa_cp_inspect_layers
+            ):
+                return
+
+        if prefix in CudaDSACPMultiHeadLatentAttentionWrapper._inspected_prefixes:
+            return
+        CudaDSACPMultiHeadLatentAttentionWrapper._inspected_prefixes.add(prefix)
+
+        logger.warning(
+            "CUDA DSA-CP phase2 inspect: prefix=%s, sparse=%s, tp=%s/%s, "
+            "hidden_size=%s, num_heads=%s, q_lora_rank=%s, kv_lora_rank=%s, "
+            "layer_sharding=%s.",
+            prefix,
+            self.cuda_dsa_cp_sparse_model,
+            self.cuda_dsa_cp_tp_rank,
+            self.cuda_dsa_cp_tp_size,
+            self.hidden_size,
+            self.num_heads,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.cuda_dsa_cp_layer_sharding,
+        )
+        logger.warning(
+            "CUDA DSA-CP phase2 modules: %s | %s | %s | %s",
+            self._module_summary("fused_qkv_a_proj", self.fused_qkv_a_proj),
+            self._module_summary("q_b_proj", self.q_b_proj),
+            self._module_summary("kv_b_proj", self.kv_b_proj),
+            self._module_summary("o_proj", self.o_proj),
+        )
 
     def _fused_qkv_a_proj_token_parallel(
         self, hidden_states: torch.Tensor
