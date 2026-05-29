@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 def _pad_first_dim(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
     if tensor.shape[0] >= target_size:
-        return tensor
+        return tensor.contiguous()
     padding = tensor.new_empty((target_size - tensor.shape[0], *tensor.shape[1:]))
-    return torch.cat((tensor, padding), dim=0)
+    return torch.cat((tensor, padding), dim=0).contiguous()
 
 
 def _cuda_dsa_cp_indexer_proj_forward(
