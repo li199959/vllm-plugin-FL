@@ -40,7 +40,6 @@ class DSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             and self.q_lora_rank is not None
             and is_deepseek_v32()
         )
-        self._logged_first_forward = False
         if self._tp_rank == 0:
             logger.warning(
                 "DSA-CP MLA wrapper init: tp_size=%d, active=%s, prefix=%s",
@@ -60,14 +59,6 @@ class DSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         if num_tokens <= self._tp_size:
             return super().forward(positions, hidden_states, llama_4_scaling)
-
-        if not self._logged_first_forward:
-            self._logged_first_forward = True
-            if self._tp_rank == 0:
-                logger.warning(
-                    "DSA-CP forward activated: num_tokens=%d, tp_size=%d",
-                    num_tokens, self._tp_size,
-                )
 
         # === DSA-CP: split A-projection across TP ranks ===
         num_tokens_pad = _round_up(num_tokens, self._tp_size)
