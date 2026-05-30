@@ -378,7 +378,10 @@ class TritonExpertsFL(TritonExperts):
         )
 
         # self.activation(
-        apply_moe_activation(
+        # NOTE: out-of-place activation backends return a fresh tensor, so
+        # capture the result rather than relying on in-place mutation of
+        # intermediate_cache2 (avoids a redundant device-to-device copy).
+        intermediate_cache2 = apply_moe_activation(
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 

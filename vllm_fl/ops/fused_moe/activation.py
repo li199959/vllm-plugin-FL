@@ -22,11 +22,14 @@ def apply_moe_activation(
             f"{output.size(-1)} vs {input.size(-1)}"
         )
 
-    # Activations with gated multiplication (gate × activation(up))
+    # Activations with gated multiplication (gate × activation(up)).
+    # SILU/GELU backends (e.g. FlagGems) are out-of-place and return a fresh
+    # tensor; return it directly instead of copying into `output` to avoid a
+    # full-size device-to-device copy every MoE layer.
     if activation == MoEActivation.SILU:
-        output.copy_(call_op("silu_and_mul", None, input))
+        return call_op("silu_and_mul", None, input)
     elif activation == MoEActivation.GELU:
-        output.copy_(call_op("gelu_and_mul", None, input))
+        return call_op("gelu_and_mul", None, input)
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUSTEP:
@@ -36,9 +39,9 @@ def apply_moe_activation(
 
     # Activations without gated multiplication
     elif activation == MoEActivation.SILU_NO_MUL:
-        output.copy_(F.silu(input))
+        return F.silu(input)
     elif activation == MoEActivation.GELU_NO_MUL:
-        output.copy_(F.gelu(input))
+        return F.gelu(input)
     elif activation == MoEActivation.RELU2_NO_MUL:
         F.relu(input, inplace=True)
         torch.square(input, out=output)
