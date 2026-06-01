@@ -113,6 +113,7 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     _logged_disabled = False
     _logged_layer_sharding = False
     _logged_a_proj_active = False
+    _logged_a_proj_cudagraph_skip = False
     _logged_indexer_proj_active = False
     _logged_indexer_proj_cudagraph_skip = False
     _inspected_prefixes: set[str] = set()
@@ -176,7 +177,22 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             and self.cuda_dsa_cp_tp_size > 1
             and self.indexer is not None
         )
+        self.cuda_dsa_cp_a_proj_skip_reason = None
         self.cuda_dsa_cp_indexer_proj_skip_reason = None
+
+        # a_proj token-parallelism is a prefill/PD-prefill throughput
+        # optimization. The imperative all_gather inside the MLA forward is not
+        # safe to capture inside a piecewise CUDA graph (the collective output
+        # buffer is opaque to Inductor, so replay reuses stale data and yields
+        # wrong output). a_proj therefore activates only when CUDA graphs are
+        # off (e.g. PD-prefill nodes run eager); decode/aggregated nodes keep
+        # native MLA + CUDA graphs untouched.
+        if (
+            self.cuda_dsa_cp_a_proj_active
+            and self._cuda_graph_capture_enabled(self.vllm_config)
+        ):
+            self.cuda_dsa_cp_a_proj_active = False
+            self.cuda_dsa_cp_a_proj_skip_reason = "CUDA graph capture is enabled"
 
         if (
             self.cuda_dsa_cp_indexer_proj_active
@@ -248,16 +264,32 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 self.cuda_dsa_cp_mode in cuda_dsa_cp_a_proj_modes()
                 and not self.cuda_dsa_cp_a_proj_active
             ):
-                logger.warning(
-                    "CUDA DSA-CP a_proj mode is enabled for %s but cannot activate "
-                    "(sparse=%s, tp_size=%s, q_lora_rank=%s, fused_qkv_a_proj=%s). "
-                    "Falling back to vLLM native MLA execution.",
-                    prefix,
-                    self.cuda_dsa_cp_sparse_model,
-                    self.cuda_dsa_cp_tp_size,
-                    self.q_lora_rank,
-                    self.fused_qkv_a_proj is not None,
-                )
+                if self.cuda_dsa_cp_a_proj_skip_reason is not None:
+                    if (
+                        self.cuda_dsa_cp_tp_rank == 0
+                        and not CudaDSACPMultiHeadLatentAttentionWrapper._logged_a_proj_cudagraph_skip
+                    ):
+                        logger.warning(
+                            "CUDA DSA-CP a_proj mode is enabled, but %s. a_proj is a "
+                            "prefill/PD-prefill throughput optimization and only "
+                            "activates without CUDA graphs (e.g. PD-prefill nodes "
+                            "run eager). Keeping CUDA graphs enabled and falling back "
+                            "to vLLM native MLA execution; decode/aggregated nodes are "
+                            "unaffected by design.",
+                            self.cuda_dsa_cp_a_proj_skip_reason,
+                        )
+                        CudaDSACPMultiHeadLatentAttentionWrapper._logged_a_proj_cudagraph_skip = True
+                else:
+                    logger.warning(
+                        "CUDA DSA-CP a_proj mode is enabled for %s but cannot activate "
+                        "(sparse=%s, tp_size=%s, q_lora_rank=%s, fused_qkv_a_proj=%s). "
+                        "Falling back to vLLM native MLA execution.",
+                        prefix,
+                        self.cuda_dsa_cp_sparse_model,
+                        self.cuda_dsa_cp_tp_size,
+                        self.q_lora_rank,
+                        self.fused_qkv_a_proj is not None,
+                    )
             if (
                 self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_proj_modes()
                 and not self.cuda_dsa_cp_indexer_proj_active
