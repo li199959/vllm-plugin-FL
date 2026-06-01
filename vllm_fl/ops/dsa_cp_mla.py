@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 from vllm_fl.ops.dsa_cp import (
-    build_token_plan,
     cuda_dsa_cp_a_proj_modes,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_indexer_proj_modes,
@@ -29,8 +28,8 @@ from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_layer_sharding,
     cuda_dsa_cp_mode,
     is_sparse_mla_model,
+    local_token_shard,
     pad_first_dim as _pad_first_dim,
-    slice_first_dim_with_plan,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,7 +244,10 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                     self.cuda_dsa_cp_layer_sharding,
                 )
                 CudaDSACPMultiHeadLatentAttentionWrapper._logged_layer_sharding = True
-            if self.cuda_dsa_cp_mode == "a_proj" and not self.cuda_dsa_cp_a_proj_active:
+            if (
+                self.cuda_dsa_cp_mode in cuda_dsa_cp_a_proj_modes()
+                and not self.cuda_dsa_cp_a_proj_active
+            ):
                 logger.warning(
                     "CUDA DSA-CP a_proj mode is enabled for %s but cannot activate "
                     "(sparse=%s, tp_size=%s, q_lora_rank=%s, fused_qkv_a_proj=%s). "
@@ -396,14 +398,12 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        plan = build_token_plan(
-            num_tokens, self.cuda_dsa_cp_tp_size, self.cuda_dsa_cp_tp_rank
+        local_hidden_states = local_token_shard(
+            hidden_states, self.cuda_dsa_cp_tp_size, self.cuda_dsa_cp_tp_rank
         )
-        local_hidden_states = slice_first_dim_with_plan(hidden_states, plan)
 
         assert self.fused_qkv_a_proj is not None
         local_qkv_lora = self.fused_qkv_a_proj(local_hidden_states)[0]
-        local_qkv_lora = _pad_first_dim(local_qkv_lora, plan.local_num_tokens_with_pad)
 
         qkv_lora = tensor_model_parallel_all_gather(local_qkv_lora, dim=0)
         return qkv_lora[:num_tokens]

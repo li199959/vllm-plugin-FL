@@ -202,6 +202,33 @@ def slice_first_dim_with_plan(tensor: torch.Tensor, plan: DSACPTokenPlan) -> tor
     return tensor[plan.local_start:plan.local_end]
 
 
+def local_token_shard(
+    tensor: torch.Tensor, world_size: int, rank: int
+) -> torch.Tensor:
+    """Return this rank's *even* contiguous token block along dim 0.
+
+    The tensor is right-padded so dim 0 is an exact multiple of ``world_size``;
+    every rank then owns ``ceil(num_tokens / world_size)`` rows. Unlike the
+    ragged ``slice_first_dim_with_plan`` (which clamps ``local_end`` with
+    ``min`` and can yield an *empty* tail slice), the block length here is
+    identical on every rank and never negative.
+
+    This matters under ``torch.compile`` / CUDA-graph capture: a ragged slice
+    such as ``hidden_states[6:1]`` is harmlessly empty in eager mode, but its
+    symbolic length ``min(num_tokens, (rank+1)*L) - rank*L`` goes negative for
+    small token counts, and Inductor's ``reinterpret_tensor`` then overflows
+    ``numel``. Even sharding keeps the slice length a single, non-negative
+    symbol shared across ranks, which the all_gather reverses exactly once the
+    padding rows are trimmed back to ``num_tokens``.
+    """
+
+    num_tokens = tensor.shape[0]
+    local_num_tokens = (num_tokens + world_size - 1) // world_size
+    padded = pad_first_dim(tensor, local_num_tokens * world_size)
+    start = rank * local_num_tokens
+    return padded[start:start + local_num_tokens]
+
+
 def pad_first_dim(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
     """Right-pad ``tensor`` along dim 0 to ``target_size`` rows.
 

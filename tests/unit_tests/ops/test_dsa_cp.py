@@ -13,6 +13,7 @@ from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_layer_sharding,
     gather_first_dim_token_shards,
     is_sparse_mla_model,
+    local_token_shard,
     pad_first_dim,
     slice_first_dim_with_plan,
 )
@@ -115,3 +116,57 @@ def test_token_parallel_gather_reconstructs_identity(num_tokens, world_size):
     assert reconstructed.shape == x.shape
     # Real token rows must be bit-identical; padding rows are trimmed away.
     torch.testing.assert_close(reconstructed, x, rtol=0, atol=0)
+
+
+def _simulate_even_token_parallel_gather(
+    x: torch.Tensor, world_size: int
+) -> torch.Tensor:
+    """Reproduce the a_proj even-shard + all-gather + trim on a single host.
+
+    This mirrors ``_fused_qkv_a_proj_token_parallel`` after the cudagraph fix:
+    every rank takes its *equal-length* contiguous block via ``local_token_shard``
+    (input padded to a multiple of ``world_size``), the shards are concatenated
+    in rank order, and the padding tail is trimmed back to ``num_tokens``.
+    """
+
+    num_tokens = x.shape[0]
+    shards = [local_token_shard(x, world_size, rank) for rank in range(world_size)]
+    return gather_first_dim_token_shards(shards, num_tokens)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,world_size",
+    [
+        (16, 4),  # evenly divisible
+        (10, 4),  # tail rank partially filled
+        (9, 8),   # later ranks fully empty (only padding)
+        (1, 8),   # single token: old ragged slice gave rank>=1 a negative length
+        (8, 1),   # no sharding
+        (4096, 8),  # prefill-sized
+    ],
+)
+def test_even_token_parallel_gather_reconstructs_identity(num_tokens, world_size):
+    x = torch.randn(num_tokens, 7)
+
+    reconstructed = _simulate_even_token_parallel_gather(x, world_size)
+
+    assert reconstructed.shape == x.shape
+    torch.testing.assert_close(reconstructed, x, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("world_size", [1, 4, 8])
+def test_local_token_shard_is_equal_length_and_non_negative(world_size):
+    # Regression: the old ragged slice ``hidden_states[start:min(end, n)]`` is
+    # empty in eager but its symbolic length goes negative under torch.compile
+    # (Inductor reinterpret_tensor numel overflow during cudagraph capture).
+    # Even sharding must give every rank an identical, non-negative length.
+    num_tokens = 1
+    x = torch.randn(num_tokens, 7)
+    expected_len = (num_tokens + world_size - 1) // world_size
+
+    lengths = [
+        local_token_shard(x, world_size, rank).shape[0] for rank in range(world_size)
+    ]
+
+    assert all(length == expected_len for length in lengths)
+    assert all(length >= 0 for length in lengths)
