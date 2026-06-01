@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 from vllm_fl.ops.dsa_cp import (
+    build_token_plan,
     cuda_dsa_cp_a_proj_modes,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_indexer_proj_modes,
@@ -28,16 +29,11 @@ from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_layer_sharding,
     cuda_dsa_cp_mode,
     is_sparse_mla_model,
+    pad_first_dim as _pad_first_dim,
+    slice_first_dim_with_plan,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _pad_first_dim(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
-    if tensor.shape[0] >= target_size:
-        return tensor.contiguous()
-    padding = tensor.new_empty((target_size - tensor.shape[0], *tensor.shape[1:]))
-    return torch.cat((tensor, padding), dim=0).contiguous()
 
 
 def _cuda_dsa_cp_indexer_proj_forward(
@@ -400,23 +396,14 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        tokens_per_rank = (
-            num_tokens + self.cuda_dsa_cp_tp_size - 1
-        ) // self.cuda_dsa_cp_tp_size
-        local_start = self.cuda_dsa_cp_tp_rank * tokens_per_rank
-        local_hidden_states = hidden_states[local_start : local_start + tokens_per_rank]
+        plan = build_token_plan(
+            num_tokens, self.cuda_dsa_cp_tp_size, self.cuda_dsa_cp_tp_rank
+        )
+        local_hidden_states = slice_first_dim_with_plan(hidden_states, plan)
 
         assert self.fused_qkv_a_proj is not None
         local_qkv_lora = self.fused_qkv_a_proj(local_hidden_states)[0]
-        local_num_tokens = local_qkv_lora.shape[0]
-        if local_num_tokens < tokens_per_rank:
-            padding = local_qkv_lora.new_empty(
-                (
-                    tokens_per_rank - local_num_tokens,
-                    local_qkv_lora.shape[-1],
-                )
-            )
-            local_qkv_lora = torch.cat((local_qkv_lora, padding), dim=0)
+        local_qkv_lora = _pad_first_dim(local_qkv_lora, plan.local_num_tokens_with_pad)
 
         qkv_lora = tensor_model_parallel_all_gather(local_qkv_lora, dim=0)
         return qkv_lora[:num_tokens]

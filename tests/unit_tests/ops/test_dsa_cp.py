@@ -5,12 +5,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm_fl.ops.dsa_cp import (
     build_token_plan,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_layer_sharding,
+    gather_first_dim_token_shards,
     is_sparse_mla_model,
+    pad_first_dim,
+    slice_first_dim_with_plan,
 )
 
 
@@ -72,3 +76,42 @@ def test_sparse_mla_model_checks_index_topk():
     cfg = _config(hf_text_config=SimpleNamespace(index_topk=2048))
 
     assert is_sparse_mla_model(cfg)
+
+
+def _simulate_token_parallel_gather(x: torch.Tensor, world_size: int) -> torch.Tensor:
+    """Reproduce the a_proj token-shard + all-gather + trim on a single host.
+
+    This mirrors ``_fused_qkv_a_proj_token_parallel``: every rank slices its
+    contiguous token block via the shared plan, right-pads to the common
+    per-rank length, the padded shards are concatenated in rank order, and the
+    padding tail is trimmed back to ``num_tokens``.
+    """
+
+    num_tokens = x.shape[0]
+    padded_shards = []
+    for rank in range(world_size):
+        plan = build_token_plan(num_tokens, world_size, rank)
+        shard = slice_first_dim_with_plan(x, plan)
+        padded_shards.append(pad_first_dim(shard, plan.local_num_tokens_with_pad))
+    return gather_first_dim_token_shards(padded_shards, num_tokens)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,world_size",
+    [
+        (16, 4),  # evenly divisible
+        (10, 4),  # tail rank partially filled
+        (9, 8),   # later ranks fully empty (only padding)
+        (1, 8),   # single token, most ranks empty
+        (8, 1),   # no sharding
+        (4096, 8),  # prefill-sized
+    ],
+)
+def test_token_parallel_gather_reconstructs_identity(num_tokens, world_size):
+    x = torch.randn(num_tokens, 7)
+
+    reconstructed = _simulate_token_parallel_gather(x, world_size)
+
+    assert reconstructed.shape == x.shape
+    # Real token rows must be bit-identical; padding rows are trimmed away.
+    torch.testing.assert_close(reconstructed, x, rtol=0, atol=0)

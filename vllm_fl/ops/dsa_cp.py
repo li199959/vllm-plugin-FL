@@ -200,3 +200,29 @@ def build_token_plan(num_tokens: int, world_size: int, rank: int) -> DSACPTokenP
 
 def slice_first_dim_with_plan(tensor: torch.Tensor, plan: DSACPTokenPlan) -> torch.Tensor:
     return tensor[plan.local_start:plan.local_end]
+
+
+def pad_first_dim(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
+    """Right-pad ``tensor`` along dim 0 to ``target_size`` rows.
+
+    The padding rows are uninitialized; callers must trim them after the
+    all-gather so the padding never reaches downstream compute.
+    """
+
+    if tensor.shape[0] >= target_size:
+        return tensor.contiguous()
+    padding = tensor.new_empty((target_size - tensor.shape[0], *tensor.shape[1:]))
+    return torch.cat((tensor, padding), dim=0).contiguous()
+
+
+def gather_first_dim_token_shards(
+    shards: list[torch.Tensor], num_tokens: int
+) -> torch.Tensor:
+    """Concatenate per-rank token shards in rank order and trim padding.
+
+    This mirrors what ``tensor_model_parallel_all_gather(dim=0)`` followed by a
+    ``[:num_tokens]`` trim produces, but as a pure tensor op so the
+    reconstruction math can be validated without a distributed runtime.
+    """
+
+    return torch.cat(shards, dim=0)[:num_tokens]
