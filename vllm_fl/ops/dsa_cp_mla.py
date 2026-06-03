@@ -5,23 +5,28 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from types import MethodType
 
 import torch
+from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.utils.torch_utils import _resolve_layer_name
 
 from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_a_proj_modes,
     cuda_dsa_cp_enabled,
+    cuda_dsa_cp_indexer_local_topk_modes,
     cuda_dsa_cp_indexer_proj_modes,
     cuda_dsa_cp_inspect,
     cuda_dsa_cp_inspect_layers,
@@ -33,6 +38,61 @@ from vllm_fl.ops.dsa_cp import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_indexer_metadata(indexer):
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if not isinstance(attn_metadata, dict):
+        return None, None
+
+    metadata_key = _resolve_layer_name(indexer.k_cache.prefix)
+    metadata = attn_metadata.get(metadata_key)
+    return attn_metadata, metadata_key if metadata is not None else None
+
+
+def _build_local_indexer_metadata(metadata, local_start: int, local_end: int):
+    if (
+        metadata is None
+        or metadata.num_decodes != 0
+        or metadata.num_decode_tokens != 0
+        or metadata.num_prefills <= 0
+        or metadata.prefill is None
+    ):
+        return None
+
+    local_chunks = []
+    local_cursor = 0
+    for chunk in metadata.prefill.chunks:
+        intersect_start = max(chunk.token_start, local_start)
+        intersect_end = min(chunk.token_end, local_end)
+        if intersect_start >= intersect_end:
+            continue
+
+        rel_start = intersect_start - chunk.token_start
+        rel_end = intersect_end - chunk.token_start
+        local_len = intersect_end - intersect_start
+        local_chunks.append(
+            replace(
+                chunk,
+                cu_seqlen_ks=chunk.cu_seqlen_ks[rel_start:rel_end],
+                cu_seqlen_ke=chunk.cu_seqlen_ke[rel_start:rel_end],
+                token_start=local_cursor,
+                token_end=local_cursor + local_len,
+            )
+        )
+        local_cursor += local_len
+
+    if local_cursor != local_end - local_start:
+        return None
+
+    return replace(
+        metadata,
+        slot_mapping=metadata.slot_mapping[local_start:local_end],
+        num_prefill_tokens=local_cursor,
+        prefill=replace(metadata.prefill, chunks=local_chunks),
+        decode=None,
+    )
 
 
 def _cuda_dsa_cp_indexer_proj_forward(
@@ -50,6 +110,7 @@ def _cuda_dsa_cp_indexer_proj_forward(
             hidden_states, qr, positions, rotary_emb
         )
 
+    use_local_topk = getattr(self, "_cuda_dsa_cp_local_topk", False)
     tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
     local_start = tp_rank * tokens_per_rank
     local_end = min(local_start + tokens_per_rank, num_tokens)
@@ -80,14 +141,11 @@ def _cuda_dsa_cp_indexer_proj_forward(
     q = torch.cat([q_pe, q_nope], dim=-1)
     k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
-    q = _pad_first_dim(q, tokens_per_rank)
-    k = _pad_first_dim(k, tokens_per_rank)
-    weights = _pad_first_dim(weights, tokens_per_rank)
-
-    q = tensor_model_parallel_all_gather(q, dim=0)[:num_tokens]
-    k = tensor_model_parallel_all_gather(k, dim=0)[:num_tokens]
-    weights = tensor_model_parallel_all_gather(weights, dim=0)[:num_tokens]
-
+    # Quantize Q before the cross-rank gather. The quantization is per-token
+    # and independent across rows, so doing it locally is equivalent to
+    # quantizing after the gather while cutting the dominant communication
+    # volume from BF16 Q to FP8 Q. The scale is folded into weights, matching
+    # the native FP8 SparseAttnIndexer contract.
     q = q.view(-1, self.head_dim)
     q_fp8, q_scale = per_token_group_quant_fp8(
         q,
@@ -97,13 +155,101 @@ def _cuda_dsa_cp_indexer_proj_forward(
     )
     q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
     q_scale = q_scale.view(-1, self.n_head, 1)
-
     weights = (
         weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
     )
     weights = weights.squeeze(-1)
 
+    if use_local_topk:
+        try:
+            return _cuda_dsa_cp_indexer_local_topk_forward(
+                self,
+                hidden_states,
+                local_hidden_states,
+                q_fp8,
+                k,
+                weights,
+                num_tokens,
+                local_start,
+                local_end,
+                tokens_per_rank,
+            )
+        except Exception:
+            logger.exception(
+                "CUDA DSA-CP local-topk indexer path failed; falling back to "
+                "gathered indexer_proj path."
+            )
+
+    q_fp8 = _pad_first_dim(q_fp8, tokens_per_rank)
+    k = _pad_first_dim(k, tokens_per_rank)
+    weights = _pad_first_dim(weights, tokens_per_rank)
+
+    q_fp8 = tensor_model_parallel_all_gather(q_fp8, dim=0)[:num_tokens]
+    k = tensor_model_parallel_all_gather(k, dim=0)[:num_tokens]
+    weights = tensor_model_parallel_all_gather(weights, dim=0)[:num_tokens]
+
     return self.indexer_op(hidden_states, q_fp8, k, weights)
+
+
+def _cuda_dsa_cp_indexer_local_topk_forward(
+    self,
+    hidden_states: torch.Tensor,
+    local_hidden_states: torch.Tensor,
+    local_q_fp8: torch.Tensor,
+    local_k: torch.Tensor,
+    local_weights: torch.Tensor,
+    num_tokens: int,
+    local_start: int,
+    local_end: int,
+    tokens_per_rank: int,
+) -> torch.Tensor:
+    if getattr(self.indexer_op, "use_fp4_cache", False):
+        raise RuntimeError("local-topk path does not support FP4 indexer cache")
+
+    attn_metadata, metadata_key = _get_indexer_metadata(self)
+    if attn_metadata is None or metadata_key is None:
+        raise RuntimeError("forward context attention metadata is unavailable")
+
+    metadata = attn_metadata[metadata_key]
+    local_metadata = _build_local_indexer_metadata(metadata, local_start, local_end)
+    if local_metadata is None:
+        raise RuntimeError("local-topk currently supports pure-prefill metadata only")
+
+    padded_k = _pad_first_dim(local_k, tokens_per_rank)
+    full_k = tensor_model_parallel_all_gather(padded_k, dim=0)[:num_tokens]
+
+    if not self.indexer_op.skip_k_cache_insert:
+        ops.indexer_k_quant_and_cache(
+            full_k.contiguous(),
+            self.k_cache.kv_cache,
+            metadata.slot_mapping,
+            self.quant_block_size,
+            self.scale_fmt,
+        )
+
+    old_metadata = attn_metadata[metadata_key]
+    old_skip_k_cache_insert = self.indexer_op.skip_k_cache_insert
+    try:
+        attn_metadata[metadata_key] = local_metadata
+        self.indexer_op.skip_k_cache_insert = True
+        self.indexer_op(
+            local_hidden_states,
+            local_q_fp8,
+            local_k,
+            local_weights,
+        )
+    finally:
+        self.indexer_op.skip_k_cache_insert = old_skip_k_cache_insert
+        attn_metadata[metadata_key] = old_metadata
+
+    topk_tokens = self.topk_tokens
+    local_topk = self.topk_indices_buffer[
+        : local_end - local_start, :topk_tokens
+    ].contiguous()
+    local_topk = _pad_first_dim(local_topk, tokens_per_rank)
+    full_topk = tensor_model_parallel_all_gather(local_topk, dim=0)[:num_tokens]
+    self.topk_indices_buffer[:num_tokens, :topk_tokens].copy_(full_topk)
+    return self.topk_indices_buffer
 
 
 class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
@@ -449,6 +595,9 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         indexer._cuda_dsa_cp_tp_size = self.cuda_dsa_cp_tp_size
         indexer._cuda_dsa_cp_tp_rank = self.cuda_dsa_cp_tp_rank
+        indexer._cuda_dsa_cp_local_topk = (
+            self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_local_topk_modes()
+        )
         indexer._cuda_dsa_cp_original_forward = indexer.forward
         indexer.forward = MethodType(_cuda_dsa_cp_indexer_proj_forward, indexer)
         indexer._cuda_dsa_cp_indexer_proj_patched = True

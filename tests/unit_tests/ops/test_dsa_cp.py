@@ -10,6 +10,8 @@ import torch
 from vllm_fl.ops.dsa_cp import (
     build_token_plan,
     cuda_dsa_cp_enabled,
+    cuda_dsa_cp_indexer_local_topk_modes,
+    cuda_dsa_cp_indexer_proj_modes,
     cuda_dsa_cp_layer_sharding,
     gather_first_dim_token_shards,
     is_sparse_mla_model,
@@ -71,6 +73,10 @@ def test_cuda_dsa_cp_layer_sharding_normalizes_strings():
     cfg = _config(additional_config={"layer_sharding": ["q_b_proj", "o_proj"]})
 
     assert cuda_dsa_cp_layer_sharding(cfg) == ["q_b_proj", "o_proj"]
+
+
+def test_cuda_dsa_cp_indexer_local_topk_modes_are_indexer_modes():
+    assert cuda_dsa_cp_indexer_local_topk_modes() <= cuda_dsa_cp_indexer_proj_modes()
 
 
 def test_sparse_mla_model_checks_index_topk():

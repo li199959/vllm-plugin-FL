@@ -96,6 +96,9 @@ def cuda_dsa_cp_mode(vllm_config: Any | None = None) -> str:
     vLLM's native sparse MLA execution for correctness. ``a_proj`` token-shards
     the replicated MLA A projection. ``indexer_proj`` token-shards the sparse
     indexer projection GEMMs while preserving native sparse indexer metadata.
+    ``indexer_local_topk`` additionally computes topk only for the local token
+    shard and gathers the resulting topk indices; it is an eager, pure-prefill
+    plugin-only approximation of full DSA-CP.
     """
 
     additional_config = _additional_config(vllm_config)
@@ -112,7 +115,17 @@ def cuda_dsa_cp_a_proj_modes() -> set[str]:
 
 
 def cuda_dsa_cp_indexer_proj_modes() -> set[str]:
-    return {"indexer_proj", "a_proj_indexer", "a_proj_indexer_proj"}
+    return {
+        "indexer_proj",
+        "indexer_local_topk",
+        "a_proj_indexer",
+        "a_proj_indexer_proj",
+        "a_proj_indexer_local_topk",
+    }
+
+
+def cuda_dsa_cp_indexer_local_topk_modes() -> set[str]:
+    return {"indexer_local_topk", "a_proj_indexer_local_topk"}
 
 
 def cuda_dsa_cp_layer_sharding(vllm_config: Any | None = None) -> list[str]:
