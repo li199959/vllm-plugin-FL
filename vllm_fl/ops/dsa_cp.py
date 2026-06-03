@@ -111,7 +111,12 @@ def cuda_dsa_cp_mode(vllm_config: Any | None = None) -> str:
 
 
 def cuda_dsa_cp_a_proj_modes() -> set[str]:
-    return {"a_proj", "a_proj_indexer", "a_proj_indexer_proj"}
+    return {
+        "a_proj",
+        "a_proj_indexer",
+        "a_proj_indexer_proj",
+        "a_proj_indexer_local_topk",
+    }
 
 
 def cuda_dsa_cp_indexer_proj_modes() -> set[str]:

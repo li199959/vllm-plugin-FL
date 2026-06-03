@@ -55,6 +55,13 @@ def _get_indexer_metadata(indexer):
     return attn_metadata, metadata_key if metadata is not None else None
 
 
+def _pad_first_dim_zeros(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
+    if tensor.shape[0] >= target_size:
+        return tensor.contiguous()
+    padding = tensor.new_zeros((target_size - tensor.shape[0], *tensor.shape[1:]))
+    return torch.cat((tensor, padding), dim=0).contiguous()
+
+
 def _build_local_indexer_metadata(metadata, local_start: int, local_end: int):
     if (
         metadata is None
@@ -118,10 +125,19 @@ def _cuda_dsa_cp_indexer_proj_forward(
     tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
     local_start = tp_rank * tokens_per_rank
     local_end = min(local_start + tokens_per_rank, num_tokens)
+    local_valid_len = max(0, local_end - local_start)
 
-    local_hidden_states = hidden_states[local_start:local_end]
-    local_qr = qr[local_start:local_end]
-    local_positions = positions[local_start:local_end]
+    local_slice_start = min(local_start, num_tokens)
+    local_slice_end = min(local_start + tokens_per_rank, num_tokens)
+    local_hidden_states = _pad_first_dim_zeros(
+        hidden_states[local_slice_start:local_slice_end], tokens_per_rank
+    )
+    local_qr = _pad_first_dim_zeros(
+        qr[local_slice_start:local_slice_end], tokens_per_rank
+    )
+    local_positions = _pad_first_dim_zeros(
+        positions[local_slice_start:local_slice_end], tokens_per_rank
+    )
 
     q, _ = self.wq_b(local_qr)
     q = q.view(-1, self.n_head, self.head_dim)
@@ -169,10 +185,10 @@ def _cuda_dsa_cp_indexer_proj_forward(
             return _cuda_dsa_cp_indexer_local_topk_forward(
                 self,
                 hidden_states,
-                local_hidden_states,
-                q_fp8,
-                k,
-                weights,
+                local_hidden_states[:local_valid_len],
+                q_fp8[:local_valid_len],
+                k[:local_valid_len],
+                weights[:local_valid_len],
                 num_tokens,
                 local_start,
                 local_end,
@@ -212,6 +228,9 @@ def _cuda_dsa_cp_indexer_local_topk_forward(
     local_end: int,
     tokens_per_rank: int,
 ) -> torch.Tensor:
+    if local_end <= local_start:
+        raise _CudaDSACPLocalTopkUnavailable
+
     if getattr(self.indexer_op, "use_fp4_cache", False):
         raise _CudaDSACPLocalTopkUnavailable
 
