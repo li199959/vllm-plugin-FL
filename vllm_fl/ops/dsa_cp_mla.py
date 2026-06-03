@@ -55,7 +55,7 @@ def _log_local_topk_fallback_once(indexer, reason: str, num_tokens: int) -> None
     logged_reasons = getattr(indexer, "_cuda_dsa_cp_local_topk_fallback_reasons", set())
     if reason in logged_reasons:
         return
-    logger.info(
+    logger.warning(
         "CUDA DSA-CP local-topk indexer fallback: reason=%s, tokens=%s",
         reason,
         num_tokens,
@@ -274,7 +274,7 @@ def _cuda_dsa_cp_indexer_local_topk_forward(
         getattr(self, "_cuda_dsa_cp_tp_rank", 0) == 0
         and not getattr(self, "_cuda_dsa_cp_local_topk_active_logged", False)
     ):
-        logger.info(
+        logger.warning(
             "CUDA DSA-CP local-topk indexer ACTIVE: tokens=%s, local_tokens=%s",
             num_tokens,
             local_end - local_start,
@@ -664,6 +664,16 @@ class CudaDSACPMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         indexer._cuda_dsa_cp_local_topk = (
             self.cuda_dsa_cp_mode in cuda_dsa_cp_indexer_local_topk_modes()
         )
+        if (
+            self.cuda_dsa_cp_tp_rank == 0
+            and indexer._cuda_dsa_cp_local_topk
+            and not getattr(indexer, "_cuda_dsa_cp_local_topk_mode_logged", False)
+        ):
+            logger.warning(
+                "CUDA DSA-CP local-topk indexer mode requested: mode=%s",
+                self.cuda_dsa_cp_mode,
+            )
+            indexer._cuda_dsa_cp_local_topk_mode_logged = True
         indexer._cuda_dsa_cp_original_forward = indexer.forward
         indexer.forward = MethodType(_cuda_dsa_cp_indexer_proj_forward, indexer)
         indexer._cuda_dsa_cp_indexer_proj_patched = True
