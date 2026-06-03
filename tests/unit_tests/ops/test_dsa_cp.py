@@ -183,6 +183,23 @@ def test_even_token_parallel_gather_reconstructs_identity(num_tokens, world_size
     torch.testing.assert_close(reconstructed, x, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize(
+    ("num_tokens", "world_size", "rank"),
+    [
+        (1, 8, 1),
+        (1, 8, 7),
+        (9, 8, 5),
+        (9, 8, 7),
+    ],
+)
+def test_local_token_shard_zero_pads_empty_ranks(num_tokens, world_size, rank):
+    x = torch.randn(num_tokens, 7)
+
+    shard = local_token_shard(x, world_size, rank)
+
+    torch.testing.assert_close(shard, torch.zeros_like(shard), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("world_size", [1, 4, 8])
 def test_local_token_shard_is_equal_length_and_non_negative(world_size):
     # Regression: the old ragged slice ``hidden_states[start:min(end, n)]`` is

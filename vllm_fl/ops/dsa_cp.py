@@ -247,11 +247,19 @@ def local_token_shard(
     ``numel``. Even sharding keeps the slice length a single, non-negative
     symbol shared across ranks, which the all_gather reverses exactly once the
     padding rows are trimmed back to ``num_tokens``.
+
+    The padding uses zeros instead of uninitialized memory because callers feed
+    the local shard into GEMMs before gathering and trimming.
     """
 
     num_tokens = tensor.shape[0]
     local_num_tokens = (num_tokens + world_size - 1) // world_size
-    padded = pad_first_dim(tensor, local_num_tokens * world_size)
+    target_size = local_num_tokens * world_size
+    if tensor.shape[0] >= target_size:
+        padded = tensor.contiguous()
+    else:
+        padding = tensor.new_zeros((target_size - tensor.shape[0], *tensor.shape[1:]))
+        padded = torch.cat((tensor, padding), dim=0).contiguous()
     start = rank * local_num_tokens
     return padded[start:start + local_num_tokens]
 
