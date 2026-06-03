@@ -10,6 +10,7 @@ import torch
 from vllm_fl.ops.dsa_cp import (
     build_token_plan,
     cuda_dsa_cp_a_proj_modes,
+    cuda_dsa_cp_all_ranks_have_token,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_indexer_local_topk_modes,
     cuda_dsa_cp_indexer_proj_modes,
@@ -82,6 +83,23 @@ def test_cuda_dsa_cp_indexer_local_topk_modes_are_indexer_modes():
 
 def test_cuda_dsa_cp_combined_local_topk_mode_enables_a_proj():
     assert "a_proj_indexer_local_topk" in cuda_dsa_cp_a_proj_modes()
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "world_size", "expected"),
+    [
+        (0, 8, False),
+        (1, 8, False),
+        (7, 8, False),
+        (8, 8, True),
+        (9, 8, False),
+        (14, 8, False),
+        (15, 8, True),
+        (30000, 8, True),
+    ],
+)
+def test_cuda_dsa_cp_all_ranks_have_token(num_tokens, world_size, expected):
+    assert cuda_dsa_cp_all_ranks_have_token(num_tokens, world_size) == expected
 
 
 def test_sparse_mla_model_checks_index_topk():

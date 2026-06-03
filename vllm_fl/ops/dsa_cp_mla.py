@@ -25,6 +25,7 @@ from vllm.utils.torch_utils import _resolve_layer_name
 
 from vllm_fl.ops.dsa_cp import (
     cuda_dsa_cp_a_proj_modes,
+    cuda_dsa_cp_all_ranks_have_token,
     cuda_dsa_cp_enabled,
     cuda_dsa_cp_indexer_local_topk_modes,
     cuda_dsa_cp_indexer_proj_modes,
@@ -121,8 +122,15 @@ def _cuda_dsa_cp_indexer_proj_forward(
             hidden_states, qr, positions, rotary_emb
         )
 
-    use_local_topk = getattr(self, "_cuda_dsa_cp_local_topk", False)
     tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
+    # local-topk runs extra collectives inside the local path. It is only safe
+    # when every rank has at least one real token; otherwise empty ranks would
+    # take the gathered fallback while non-empty ranks enter local-topk, causing
+    # a cross-rank collective order mismatch.
+    use_local_topk = (
+        getattr(self, "_cuda_dsa_cp_local_topk", False)
+        and cuda_dsa_cp_all_ranks_have_token(num_tokens, tp_size)
+    )
     local_start = tp_rank * tokens_per_rank
     local_end = min(local_start + tokens_per_rank, num_tokens)
     local_valid_len = max(0, local_end - local_start)

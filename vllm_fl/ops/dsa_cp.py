@@ -133,6 +133,15 @@ def cuda_dsa_cp_indexer_local_topk_modes() -> set[str]:
     return {"indexer_local_topk", "a_proj_indexer_local_topk"}
 
 
+def cuda_dsa_cp_all_ranks_have_token(
+    num_tokens: int, world_size: int
+) -> bool:
+    if num_tokens <= 0 or world_size <= 0:
+        return False
+    local_num_tokens = (num_tokens + world_size - 1) // world_size
+    return num_tokens > (world_size - 1) * local_num_tokens
+
+
 def cuda_dsa_cp_layer_sharding(vllm_config: Any | None = None) -> list[str]:
     additional_config = _additional_config(vllm_config)
     value = additional_config.get("layer_sharding", [])
