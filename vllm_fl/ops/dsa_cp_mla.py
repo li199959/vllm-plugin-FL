@@ -223,6 +223,16 @@ def _cuda_dsa_cp_indexer_local_topk_forward(
     local_metadata = _build_local_indexer_metadata(metadata, local_start, local_end)
     if local_metadata is None:
         raise _CudaDSACPLocalTopkUnavailable
+    if (
+        getattr(self, "_cuda_dsa_cp_tp_rank", 0) == 0
+        and not getattr(self, "_cuda_dsa_cp_local_topk_active_logged", False)
+    ):
+        logger.info(
+            "CUDA DSA-CP local-topk indexer ACTIVE: tokens=%s, local_tokens=%s",
+            num_tokens,
+            local_end - local_start,
+        )
+        self._cuda_dsa_cp_local_topk_active_logged = True
 
     padded_k = _pad_first_dim(local_k, tokens_per_rank)
     full_k = tensor_model_parallel_all_gather(padded_k, dim=0)[:num_tokens]
