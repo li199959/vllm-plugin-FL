@@ -40,6 +40,10 @@ from vllm_fl.ops.dsa_cp import (
 logger = logging.getLogger(__name__)
 
 
+class _CudaDSACPLocalTopkUnavailable(RuntimeError):
+    """Raised when a forward can safely use the gathered indexer fallback."""
+
+
 def _get_indexer_metadata(indexer):
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -174,11 +178,16 @@ def _cuda_dsa_cp_indexer_proj_forward(
                 local_end,
                 tokens_per_rank,
             )
+        except _CudaDSACPLocalTopkUnavailable:
+            pass
         except Exception:
-            logger.exception(
-                "CUDA DSA-CP local-topk indexer path failed; falling back to "
-                "gathered indexer_proj path."
-            )
+            if not getattr(self, "_cuda_dsa_cp_local_topk_error_logged", False):
+                logger.warning(
+                    "CUDA DSA-CP local-topk indexer path failed; falling "
+                    "back to gathered indexer_proj path.",
+                    exc_info=True,
+                )
+                self._cuda_dsa_cp_local_topk_error_logged = True
 
     q_fp8 = _pad_first_dim(q_fp8, tokens_per_rank)
     k = _pad_first_dim(k, tokens_per_rank)
@@ -204,16 +213,16 @@ def _cuda_dsa_cp_indexer_local_topk_forward(
     tokens_per_rank: int,
 ) -> torch.Tensor:
     if getattr(self.indexer_op, "use_fp4_cache", False):
-        raise RuntimeError("local-topk path does not support FP4 indexer cache")
+        raise _CudaDSACPLocalTopkUnavailable
 
     attn_metadata, metadata_key = _get_indexer_metadata(self)
     if attn_metadata is None or metadata_key is None:
-        raise RuntimeError("forward context attention metadata is unavailable")
+        raise _CudaDSACPLocalTopkUnavailable
 
     metadata = attn_metadata[metadata_key]
     local_metadata = _build_local_indexer_metadata(metadata, local_start, local_end)
     if local_metadata is None:
-        raise RuntimeError("local-topk currently supports pure-prefill metadata only")
+        raise _CudaDSACPLocalTopkUnavailable
 
     padded_k = _pad_first_dim(local_k, tokens_per_rank)
     full_k = tensor_model_parallel_all_gather(padded_k, dim=0)[:num_tokens]
