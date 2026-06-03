@@ -44,6 +44,25 @@ logger = logging.getLogger(__name__)
 class _CudaDSACPLocalTopkUnavailable(RuntimeError):
     """Raised when a forward can safely use the gathered indexer fallback."""
 
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _log_local_topk_fallback_once(indexer, reason: str, num_tokens: int) -> None:
+    if getattr(indexer, "_cuda_dsa_cp_tp_rank", 0) != 0:
+        return
+    logged_reasons = getattr(indexer, "_cuda_dsa_cp_local_topk_fallback_reasons", set())
+    if reason in logged_reasons:
+        return
+    logger.info(
+        "CUDA DSA-CP local-topk indexer fallback: reason=%s, tokens=%s",
+        reason,
+        num_tokens,
+    )
+    logged_reasons.add(reason)
+    indexer._cuda_dsa_cp_local_topk_fallback_reasons = logged_reasons
+
 
 def _get_indexer_metadata(indexer):
     forward_context = get_forward_context()
@@ -127,10 +146,9 @@ def _cuda_dsa_cp_indexer_proj_forward(
     # when every rank has at least one real token; otherwise empty ranks would
     # take the gathered fallback while non-empty ranks enter local-topk, causing
     # a cross-rank collective order mismatch.
-    use_local_topk = (
-        getattr(self, "_cuda_dsa_cp_local_topk", False)
-        and cuda_dsa_cp_all_ranks_have_token(num_tokens, tp_size)
-    )
+    local_topk_requested = getattr(self, "_cuda_dsa_cp_local_topk", False)
+    all_ranks_have_tokens = cuda_dsa_cp_all_ranks_have_token(num_tokens, tp_size)
+    use_local_topk = local_topk_requested and all_ranks_have_tokens
     local_start = tp_rank * tokens_per_rank
     local_end = min(local_start + tokens_per_rank, num_tokens)
     local_valid_len = max(0, local_end - local_start)
@@ -202,8 +220,8 @@ def _cuda_dsa_cp_indexer_proj_forward(
                 local_end,
                 tokens_per_rank,
             )
-        except _CudaDSACPLocalTopkUnavailable:
-            pass
+        except _CudaDSACPLocalTopkUnavailable as exc:
+            _log_local_topk_fallback_once(self, exc.reason, num_tokens)
         except Exception:
             if not getattr(self, "_cuda_dsa_cp_local_topk_error_logged", False):
                 logger.warning(
@@ -212,6 +230,8 @@ def _cuda_dsa_cp_indexer_proj_forward(
                     exc_info=True,
                 )
                 self._cuda_dsa_cp_local_topk_error_logged = True
+    elif local_topk_requested:
+        _log_local_topk_fallback_once(self, "not_all_ranks_have_tokens", num_tokens)
 
     q_fp8 = _pad_first_dim(q_fp8, tokens_per_rank)
     k = _pad_first_dim(k, tokens_per_rank)
@@ -237,19 +257,19 @@ def _cuda_dsa_cp_indexer_local_topk_forward(
     tokens_per_rank: int,
 ) -> torch.Tensor:
     if local_end <= local_start:
-        raise _CudaDSACPLocalTopkUnavailable
+        raise _CudaDSACPLocalTopkUnavailable("empty_local_shard")
 
     if getattr(self.indexer_op, "use_fp4_cache", False):
-        raise _CudaDSACPLocalTopkUnavailable
+        raise _CudaDSACPLocalTopkUnavailable("fp4_cache")
 
     attn_metadata, metadata_key = _get_indexer_metadata(self)
     if attn_metadata is None or metadata_key is None:
-        raise _CudaDSACPLocalTopkUnavailable
+        raise _CudaDSACPLocalTopkUnavailable("metadata_unavailable")
 
     metadata = attn_metadata[metadata_key]
     local_metadata = _build_local_indexer_metadata(metadata, local_start, local_end)
     if local_metadata is None:
-        raise _CudaDSACPLocalTopkUnavailable
+        raise _CudaDSACPLocalTopkUnavailable("non_prefill_metadata")
     if (
         getattr(self, "_cuda_dsa_cp_tp_rank", 0) == 0
         and not getattr(self, "_cuda_dsa_cp_local_topk_active_logged", False)
