@@ -10,7 +10,9 @@ variables before vLLM validates the model/parallel config.
 
 from __future__ import annotations
 
+import math
 import os
+import sys
 from typing import Any
 
 from vllm.logger import init_logger
@@ -20,6 +22,7 @@ logger = init_logger(__name__)
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PATCHED = False
+_KV_CACHE_PATCHED = False
 
 _QWEN_DCP_MODEL_TYPES = {
     "qwen3_next",
@@ -263,11 +266,72 @@ def should_use_qwen_dcp_attention_backend() -> bool:
     return int(vllm_config.parallel_config.decode_context_parallel_size) > 1
 
 
+def _qwen_dcp_enabled_for_config(vllm_config: Any | None) -> bool:
+    if vllm_config is None:
+        return False
+    if not is_qwen_dcp_model(getattr(vllm_config, "model_config", None)):
+        return False
+    return int(vllm_config.parallel_config.decode_context_parallel_size) > 1
+
+
+def _patch_hybrid_kv_cache_block_size_for_no_prefix_cache() -> None:
+    """Allow Qwen hybrid KV groups with DCP when prefix caching is disabled.
+
+    Upstream vLLM currently rejects context parallelism for any multi-group
+    hybrid KV cache before it knows whether the no-prefix-cache coordinator will
+    be used. The no-prefix-cache path already handles multiple KV groups and
+    CP-aware block tables, so keep this bypass narrow to avoid enabling hybrid
+    prefix-cache or KV-connector paths.
+    """
+
+    global _KV_CACHE_PATCHED
+    if _KV_CACHE_PATCHED:
+        return
+
+    from vllm.v1.core import kv_cache_utils
+
+    original_resolve = kv_cache_utils.resolve_kv_cache_block_sizes
+
+    def patched_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config):
+        if (
+            _qwen_dcp_enabled_for_config(vllm_config)
+            and len(kv_cache_config.kv_cache_groups) > 1
+            and not vllm_config.cache_config.enable_prefix_caching
+            and vllm_config.kv_transfer_config is None
+        ):
+            dcp = vllm_config.parallel_config.decode_context_parallel_size
+            pcp = vllm_config.parallel_config.prefill_context_parallel_size
+            group_block_sizes = [
+                group.kv_cache_spec.block_size
+                for group in kv_cache_config.kv_cache_groups
+            ]
+            scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
+            logger.info_once(
+                "Qwen DCP bypassed hybrid KV cache block-size guard: "
+                "group_block_sizes=%s, scheduler_block_size=%s. "
+                "Prefix caching and KV transfer are disabled.",
+                group_block_sizes,
+                scheduler_block_size,
+            )
+            return scheduler_block_size, scheduler_block_size
+
+        return original_resolve(kv_cache_config, vllm_config)
+
+    kv_cache_utils.resolve_kv_cache_block_sizes = patched_resolve_kv_cache_block_sizes
+
+    core_module = sys.modules.get("vllm.v1.engine.core")
+    if core_module is not None:
+        core_module.resolve_kv_cache_block_sizes = patched_resolve_kv_cache_block_sizes
+
+    _KV_CACHE_PATCHED = True
+
+
 def apply_platform_patches() -> None:
     """Install a VllmConfig pre-validation hook for Qwen DCP env handling."""
 
     global _PATCHED
     if _PATCHED:
+        _patch_hybrid_kv_cache_block_size_for_no_prefix_cache()
         return
 
     from vllm.config import VllmConfig
@@ -279,5 +343,5 @@ def apply_platform_patches() -> None:
         return original_post_init(self)
 
     VllmConfig.__post_init__ = patched_post_init
+    _patch_hybrid_kv_cache_block_size_for_no_prefix_cache()
     _PATCHED = True
-
