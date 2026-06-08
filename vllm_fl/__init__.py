@@ -74,6 +74,9 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    from vllm_fl.patches.qwen_dcp import apply_platform_patches as qwen_dcp_platform
+
+    qwen_dcp_platform()
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
