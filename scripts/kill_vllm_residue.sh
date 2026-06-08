@@ -6,6 +6,7 @@ PID_FILE="${PID_FILE:-vllm-qwen3.6-35b-a3b.pid}"
 MODEL_PATTERN="${MODEL_PATTERN:-Qwen3.6-35B-A3B|qwen3.6-35b-a3b}"
 DRY_RUN=0
 SKIP_KILL9=0
+INCLUDE_GPU=0
 
 usage() {
   cat <<'EOF'
@@ -18,6 +19,7 @@ Options:
   --pattern REGEX         Process command regex, default: Qwen3.6-35B-A3B|qwen3.6-35b-a3b
   --dry-run               Print matched processes without killing
   --no-kill9              Do not escalate to SIGKILL after SIGTERM
+  --include-gpu           Also kill visible processes using /dev/nvidia* or listed by nvidia-smi
   -h, --help              Show this help
 
 Environment overrides:
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_KILL9=1
       shift
       ;;
+    --include-gpu)
+      INCLUDE_GPU=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -60,6 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 declare -A PIDS=()
+INVISIBLE_GPU_PIDS=()
 
 add_pid() {
   local pid="${1:-}"
@@ -103,6 +110,30 @@ while read -r pid _cmd; do
   add_pid "$pid"
 done < <(ps -eo pid=,args= | grep -E "$MODEL_PATTERN" | grep -v grep || true)
 
+if [[ "$INCLUDE_GPU" == "1" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    while IFS=, read -r pid _rest; do
+      pid="${pid//[[:space:]]/}"
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        add_pid "$pid"
+      else
+        INVISIBLE_GPU_PIDS+=("$pid")
+      fi
+    done < <(nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+      --format=csv,noheader,nounits 2>/dev/null || true)
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    for dev in /dev/nvidia*; do
+      [[ -e "$dev" ]] || continue
+      while read -r pid; do
+        add_pid "$pid"
+      done < <(fuser "$dev" 2>/dev/null | tr ' ' '\n' || true)
+    done
+  fi
+fi
+
 for pid in "${!PIDS[@]}"; do
   add_descendants "$pid"
 done
@@ -116,6 +147,11 @@ echo "Matched processes:"
 for pid in "${!PIDS[@]}"; do
   ps -o pid=,ppid=,stat=,cmd= -p "$pid" || true
 done | sort -n
+
+if [[ ${#INVISIBLE_GPU_PIDS[@]} -gt 0 ]]; then
+  echo "GPU PIDs listed by nvidia-smi but not visible in this PID namespace:"
+  printf '  %s\n' "${INVISIBLE_GPU_PIDS[@]}"
+fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "Dry run only. No process was killed."
@@ -152,7 +188,10 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 echo "Remaining matches:"
-ps -eo pid=,ppid=,stat=,cmd= | grep -E "$MODEL_PATTERN|vllm serve" | grep -v grep || true
+ps -eo pid=,ppid=,stat=,cmd= \
+  | grep -E "$MODEL_PATTERN|vllm serve" \
+  | grep -v grep \
+  | grep -v "kill_vllm_residue.sh" || true
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   echo "GPU compute processes:"
