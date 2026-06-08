@@ -159,6 +159,11 @@ class FlagGemsBackend(Backend):
         if use_sparse:
             raise ValueError("use_sparse=True requires use_mla=True.")
 
+        from vllm_fl.patches.qwen_dcp import should_use_qwen_dcp_attention_backend
+
+        if should_use_qwen_dcp_attention_backend():
+            return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
+
         return AttentionBackendEnum.TRITON_ATTN.get_path()
 
     def moe_align_block_size(
