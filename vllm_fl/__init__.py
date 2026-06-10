@@ -78,6 +78,11 @@ def register_model():
     register_quant_linear()
     register_router()
     try:
+        from vllm_fl.patches.nixl_gdn import apply_nixl_gdn_patch
+        apply_nixl_gdn_patch()
+    except Exception as e:
+        logger.error(f"Register NIXL GDN patch error: {str(e)}")
+    try:
         from vllm_fl.ops.gqa_cp import apply_qwen_gqa_cp_patch
         apply_qwen_gqa_cp_patch()
     except Exception as e:
