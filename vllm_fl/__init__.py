@@ -77,6 +77,11 @@ def register_model():
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
     register_router()
+    try:
+        from vllm_fl.ops.gqa_cp import apply_qwen_gqa_cp_patch
+        apply_qwen_gqa_cp_patch()
+    except Exception as e:
+        logger.error(f"Register Qwen GQA-CP patch error: {str(e)}")
 
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
