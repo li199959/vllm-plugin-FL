@@ -50,6 +50,10 @@ def register():
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
     glm5_platform()
+    from vllm_fl.patches.gdn_mixed_prefill_decode import (
+        apply_gdn_mixed_prefill_decode_patch,
+    )
+    apply_gdn_mixed_prefill_decode_patch()
 
     # Note: FlagCX connector registration is deferred to register_model()
     # to avoid circular imports during VllmConfig.__post_init__ in spawned
@@ -73,6 +77,11 @@ def register_router():
 def register_model():
     """Register FL-specific models not yet upstream."""
     _register_flagcx_connector()
+
+    from vllm_fl.patches.gdn_mixed_prefill_decode import (
+        apply_gdn_mixed_prefill_decode_patch,
+    )
+    apply_gdn_mixed_prefill_decode_patch()
 
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
