@@ -218,6 +218,7 @@ from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_chang
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
+from vllm_fl.patches import mamba_gpu_postprocess
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_total_cp_world_size,
@@ -904,6 +905,10 @@ class ModelRunnerFL(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self._mamba_gpu_postprocess_ctx: (
+            mamba_gpu_postprocess.MambaSpecDecodeGPUContext | None
+        ) = None
+        self._mamba_gpu_postprocess_disabled = False
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1009,6 +1014,29 @@ class ModelRunnerFL(
                 self._make_buffer,
             )
         return self._mamba_copy_bufs
+
+    def _use_mamba_gpu_postprocess(self) -> bool:
+        return (
+            mamba_gpu_postprocess.enable_mamba_gpu_postprocess()
+            and not self._mamba_gpu_postprocess_disabled
+            and self.device.type == "cuda"
+            and self.speculative_config is not None
+            and self.model_config.is_hybrid
+            and self.cache_config.mamba_cache_mode == "align"
+        )
+
+    def _get_mamba_gpu_postprocess_ctx(
+        self,
+    ) -> mamba_gpu_postprocess.MambaSpecDecodeGPUContext:
+        if self._mamba_gpu_postprocess_ctx is None:
+            self._mamba_gpu_postprocess_ctx = mamba_gpu_postprocess.create_context(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=self.kv_cache_config,
+                copy_funcs=self.model.get_mamba_state_copy_func(),
+                device=self.device,
+                make_buffer=self._make_buffer,
+            )
+        return self._mamba_gpu_postprocess_ctx
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1485,19 +1513,42 @@ class ModelRunnerFL(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-            mamba_utils.postprocess_mamba(
-                scheduler_output,
-                self.kv_cache_config,
-                self.input_batch,
-                self.requests,
-                self.mamba_state_idx,
-                self.compilation_config.static_forward_context,
-                self.model.get_mamba_state_copy_func(),
-                self._get_mamba_copy_bufs(),
+            if self._use_mamba_gpu_postprocess():
+                try:
+                    mamba_gpu_postprocess.postprocess_align_gpu(
+                        ctx=self._get_mamba_gpu_postprocess_ctx(),
+                        num_reqs=num_reqs,
+                        num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+                        num_accepted_tokens_cpu_tensor=(
+                            self.input_batch.num_accepted_tokens_cpu_tensor
+                        ),
+                        input_batch=self.input_batch,
+                        kv_cache_config=self.kv_cache_config,
+                        forward_context=self.compilation_config.static_forward_context,
+                        mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                    )
+                    assert self.num_accepted_tokens_event is not None
+                    self.num_accepted_tokens_event.record()
+                    return
+                except Exception:
+                    logger.warning(
+                        "FL Mamba GPU postprocess failed; falling back to "
+                        "CPU postprocess.",
+                        exc_info=True,
+                    )
+                    self._mamba_gpu_postprocess_disabled = True
+
+            mamba_gpu_postprocess.postprocess_align_cpu_fallback(
+                scheduler_output=scheduler_output,
+                kv_cache_config=self.kv_cache_config,
+                input_batch=self.input_batch,
+                requests=self.requests,
+                mamba_state_idx=self.mamba_state_idx,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                copy_bufs=self._get_mamba_copy_bufs(),
+                num_reqs=num_reqs,
+                num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
             )
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
@@ -4016,6 +4067,23 @@ class ModelRunnerFL(
                     self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                 )
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                if self._use_mamba_gpu_postprocess():
+                    try:
+                        mamba_gpu_postprocess.stage_inputs_to_gpu(
+                            ctx=self._get_mamba_gpu_postprocess_ctx(),
+                            scheduler_output=scheduler_output,
+                            req_ids=self.input_batch.req_ids,
+                            num_reqs=num_reqs,
+                            requests=self.requests,
+                            mamba_state_idx=self.mamba_state_idx,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "FL Mamba GPU postprocess staging failed; "
+                            "falling back to CPU postprocess.",
+                            exc_info=True,
+                        )
+                        self._mamba_gpu_postprocess_disabled = True
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -6863,6 +6931,8 @@ class ModelRunnerFL(
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_copy_bufs = None
+        self._mamba_gpu_postprocess_ctx = None
+        self._mamba_gpu_postprocess_disabled = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
