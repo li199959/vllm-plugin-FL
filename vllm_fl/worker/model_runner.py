@@ -909,9 +909,19 @@ class ModelRunnerFL(
             mamba_gpu_postprocess.MambaSpecDecodeGPUContext | None
         ) = None
         self._mamba_gpu_postprocess_disabled = False
+        self._mamba_gpu_postprocess_entry_logged = False
         self._mamba_gpu_postprocess_config_logged = False
         self._mamba_gpu_postprocess_success_logged = False
         self._mamba_gpu_postprocess_staging_logged = False
+        logger.warning(
+            "FL ModelRunnerFL initialized: file=%s, device=%s, "
+            "has_speculative_config=%s, is_hybrid=%s, mamba_cache_mode=%s",
+            __file__,
+            self.device.type,
+            self.speculative_config is not None,
+            self.model_config.is_hybrid,
+            self.cache_config.mamba_cache_mode,
+        )
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1562,7 +1572,24 @@ class ModelRunnerFL(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
+        if not self._mamba_gpu_postprocess_entry_logged:
+            self._mamba_gpu_postprocess_entry_logged = True
+            logger.warning(
+                "FL Mamba postprocess entry: has_speculative_config=%s, "
+                "is_hybrid=%s, mamba_cache_mode=%s, output_shape=%s",
+                self.speculative_config is not None,
+                self.model_config.is_hybrid,
+                self.cache_config.mamba_cache_mode,
+                tuple(output_token_ids.shape),
+            )
+
         if not self.speculative_config or not self.model_config.is_hybrid:
+            logger.warning(
+                "FL Mamba postprocess skipped: has_speculative_config=%s, "
+                "is_hybrid=%s",
+                self.speculative_config is not None,
+                self.model_config.is_hybrid,
+            )
             return
 
         # TODO: Remove .cpu() sync to enable fully async for hybrid model;
