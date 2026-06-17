@@ -909,6 +909,9 @@ class ModelRunnerFL(
             mamba_gpu_postprocess.MambaSpecDecodeGPUContext | None
         ) = None
         self._mamba_gpu_postprocess_disabled = False
+        self._mamba_gpu_postprocess_config_logged = False
+        self._mamba_gpu_postprocess_success_logged = False
+        self._mamba_gpu_postprocess_staging_logged = False
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1016,13 +1019,35 @@ class ModelRunnerFL(
         return self._mamba_copy_bufs
 
     def _use_mamba_gpu_postprocess(self) -> bool:
-        return (
-            mamba_gpu_postprocess.enable_mamba_gpu_postprocess()
+        env_enabled = mamba_gpu_postprocess.enable_mamba_gpu_postprocess()
+        enabled = (
+            env_enabled
             and not self._mamba_gpu_postprocess_disabled
             and self.device.type == "cuda"
             and self.speculative_config is not None
             and self.model_config.is_hybrid
             and self.cache_config.mamba_cache_mode == "align"
+        )
+        self._log_mamba_gpu_postprocess_config_once(env_enabled, enabled)
+        return enabled
+
+    def _log_mamba_gpu_postprocess_config_once(
+        self, env_enabled: bool, enabled: bool
+    ) -> None:
+        if self._mamba_gpu_postprocess_config_logged:
+            return
+        self._mamba_gpu_postprocess_config_logged = True
+        logger.info(
+            "FL Mamba GPU postprocess %s: env_enabled=%s, disabled=%s, "
+            "device=%s, has_speculative_config=%s, is_hybrid=%s, "
+            "mamba_cache_mode=%s",
+            "enabled" if enabled else "not enabled",
+            env_enabled,
+            self._mamba_gpu_postprocess_disabled,
+            self.device.type,
+            self.speculative_config is not None,
+            self.model_config.is_hybrid,
+            self.cache_config.mamba_cache_mode,
         )
 
     def _get_mamba_gpu_postprocess_ctx(
@@ -1037,6 +1062,43 @@ class ModelRunnerFL(
                 make_buffer=self._make_buffer,
             )
         return self._mamba_gpu_postprocess_ctx
+
+    def _log_mamba_gpu_postprocess_staging_once(
+        self,
+        ctx: mamba_gpu_postprocess.MambaSpecDecodeGPUContext,
+        num_reqs: int,
+    ) -> None:
+        if self._mamba_gpu_postprocess_staging_logged:
+            return
+        self._mamba_gpu_postprocess_staging_logged = True
+        logger.info(
+            "FL Mamba GPU postprocess staging active: num_reqs=%d, "
+            "num_groups=%d, num_layers=%d, num_state_types=%d, block_size=%d",
+            num_reqs,
+            ctx.num_groups,
+            ctx.num_layers,
+            ctx.num_state_types,
+            ctx.block_size,
+        )
+
+    def _log_mamba_gpu_postprocess_success_once(
+        self,
+        ctx: mamba_gpu_postprocess.MambaSpecDecodeGPUContext,
+        num_reqs: int,
+    ) -> None:
+        if self._mamba_gpu_postprocess_success_logged:
+            return
+        self._mamba_gpu_postprocess_success_logged = True
+        logger.info(
+            "FL Mamba GPU postprocess fused kernel path active: num_reqs=%d, "
+            "num_groups=%d, total_states=%d, block_size=%d, "
+            "block_table_stride_req=%d",
+            num_reqs,
+            ctx.num_groups,
+            ctx.num_layers * ctx.num_state_types,
+            ctx.block_size,
+            ctx.block_table_stride_req,
+        )
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1515,8 +1577,9 @@ class ModelRunnerFL(
         if self.cache_config.mamba_cache_mode == "align":
             if self._use_mamba_gpu_postprocess():
                 try:
+                    mamba_gpu_postprocess_ctx = self._get_mamba_gpu_postprocess_ctx()
                     mamba_gpu_postprocess.postprocess_align_gpu(
-                        ctx=self._get_mamba_gpu_postprocess_ctx(),
+                        ctx=mamba_gpu_postprocess_ctx,
                         num_reqs=num_reqs,
                         num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                         num_accepted_tokens_cpu_tensor=(
@@ -1526,6 +1589,9 @@ class ModelRunnerFL(
                         kv_cache_config=self.kv_cache_config,
                         forward_context=self.compilation_config.static_forward_context,
                         mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                    )
+                    self._log_mamba_gpu_postprocess_success_once(
+                        mamba_gpu_postprocess_ctx, num_reqs
                     )
                     assert self.num_accepted_tokens_event is not None
                     self.num_accepted_tokens_event.record()
@@ -4069,13 +4135,19 @@ class ModelRunnerFL(
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
                 if self._use_mamba_gpu_postprocess():
                     try:
+                        mamba_gpu_postprocess_ctx = (
+                            self._get_mamba_gpu_postprocess_ctx()
+                        )
                         mamba_gpu_postprocess.stage_inputs_to_gpu(
-                            ctx=self._get_mamba_gpu_postprocess_ctx(),
+                            ctx=mamba_gpu_postprocess_ctx,
                             scheduler_output=scheduler_output,
                             req_ids=self.input_batch.req_ids,
                             num_reqs=num_reqs,
                             requests=self.requests,
                             mamba_state_idx=self.mamba_state_idx,
+                        )
+                        self._log_mamba_gpu_postprocess_staging_once(
+                            mamba_gpu_postprocess_ctx, num_reqs
                         )
                     except Exception:
                         logger.warning(
