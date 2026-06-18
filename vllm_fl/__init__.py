@@ -1,12 +1,10 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
-import os
 import logging
-
-from vllm_fl.utils import get_op_config as _get_op_config
+import os
 
 from . import version as version  # PyTorch-style: vllm_fl.version.git_version
-
+from vllm_fl.utils import get_op_config as _get_op_config
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +12,7 @@ logger = logging.getLogger(__name__)
 def __getattr__(name):
     if name == "distributed":
         import importlib
+
         module = importlib.import_module(f".{name}", __name__)
         globals()[name] = module
         return module
@@ -23,10 +22,9 @@ def __getattr__(name):
 def _patch_transformers_compat():
     """Patch transformers compatibility for ALLOWED_LAYER_TYPES and tokenizer."""
     import transformers.configuration_utils as cfg
+
     if not hasattr(cfg, "ALLOWED_LAYER_TYPES"):
-        cfg.ALLOWED_LAYER_TYPES = getattr(
-            cfg, "ALLOWED_ATTENTION_LAYER_TYPES", ()
-        )
+        cfg.ALLOWED_LAYER_TYPES = getattr(cfg, "ALLOWED_ATTENTION_LAYER_TYPES", ())
 
 
 def _register_flagcx_connector():
@@ -49,11 +47,18 @@ def register():
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
+
     glm5_platform()
     from vllm_fl.patches.gdn_mixed_prefill_decode import (
         apply_gdn_mixed_prefill_decode_patch,
     )
+
     apply_gdn_mixed_prefill_decode_patch()
+    from vllm_fl.patches.gdn_fused_projection import (
+        apply_gdn_fused_projection_patch,
+    )
+
+    apply_gdn_fused_projection_patch()
 
     # Note: FlagCX connector registration is deferred to register_model()
     # to avoid circular imports during VllmConfig.__post_init__ in spawned
@@ -66,13 +71,18 @@ def register():
 
     return "vllm_fl.platform.PlatformFL"
 
+
 def register_quant_linear():
     from vllm_fl.quantization.quant_linear import add_oot_quant_kernel
+
     add_oot_quant_kernel()
+
 
 def register_router():
     from vllm_fl.ops.fused_moe.router import replace_router_with_fl
+
     replace_router_with_fl()
+
 
 def register_model():
     """Register FL-specific models not yet upstream."""
@@ -81,7 +91,13 @@ def register_model():
     from vllm_fl.patches.gdn_mixed_prefill_decode import (
         apply_gdn_mixed_prefill_decode_patch,
     )
+
     apply_gdn_mixed_prefill_decode_patch()
+    from vllm_fl.patches.gdn_fused_projection import (
+        apply_gdn_fused_projection_patch,
+    )
+
+    apply_gdn_fused_projection_patch()
 
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
@@ -90,10 +106,12 @@ def register_model():
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
+
         from vllm_fl.configs.glm_moe_dsa import GlmMoeDsaConfig
+
         _CONFIG_REGISTRY["glm_moe_dsa"] = GlmMoeDsaConfig
 
-        #from vllm_fl.patches.glm_moe_dsa import apply_model_patches as glm5_model
-        #glm5_model()
+        # from vllm_fl.patches.glm_moe_dsa import apply_model_patches as glm5_model
+        # glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
