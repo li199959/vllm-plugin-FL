@@ -45,20 +45,13 @@ def register():
     """Register the FL platform."""
     _patch_transformers_compat()
 
-    # Model-specific platform patches
+    # Platform-only patches must not import model/runtime modules here.  This
+    # entrypoint is called while vLLM is still selecting the platform/vendor
+    # backend; importing GDN model code here can make vendor detection fall back
+    # to "unknown" and unintentionally bypass FlagGems.
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
 
     glm5_platform()
-    from vllm_fl.patches.gdn_mixed_prefill_decode import (
-        apply_gdn_mixed_prefill_decode_patch,
-    )
-
-    apply_gdn_mixed_prefill_decode_patch()
-    from vllm_fl.patches.gdn_fused_projection import (
-        apply_gdn_fused_projection_patch,
-    )
-
-    apply_gdn_fused_projection_patch()
 
     # Note: FlagCX connector registration is deferred to register_model()
     # to avoid circular imports during VllmConfig.__post_init__ in spawned
@@ -84,10 +77,8 @@ def register_router():
     replace_router_with_fl()
 
 
-def register_model():
-    """Register FL-specific models not yet upstream."""
-    _register_flagcx_connector()
-
+def _apply_gdn_model_patches():
+    """Apply optional GDN runtime patches after platform/vendor selection."""
     from vllm_fl.patches.gdn_mixed_prefill_decode import (
         apply_gdn_mixed_prefill_decode_patch,
     )
@@ -99,11 +90,17 @@ def register_model():
 
     apply_gdn_fused_projection_patch()
 
+
+def register_model():
+    """Register FL-specific models not yet upstream."""
+    _register_flagcx_connector()
+    _apply_gdn_model_patches()
+
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
     register_router()
 
-    # Register GLM-5 (GlmMoeDsa) — config not yet upstream
+    # Register GLM-5 (GlmMoeDsa) config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
 

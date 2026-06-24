@@ -21,7 +21,7 @@ _PATCHED = False
 
 def _enabled() -> bool:
     return os.environ.get(
-        "VLLM_FL_ENABLE_GDN_MIXED_PREFILL_DECODE_SPLIT", "1"
+        "VLLM_FL_ENABLE_GDN_MIXED_PREFILL_DECODE_SPLIT", "0"
     ).lower() not in {"0", "false", "no", "off"}
 
 
