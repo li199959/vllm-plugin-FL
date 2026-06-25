@@ -94,6 +94,12 @@ def register():
     _patch_flash_attn_import()
     _patch_transformers_compat()
 
+    from vllm_fl.patches.qwen35_pcp_triton_bringup import (
+        apply_qwen35_pcp_hybrid_kv_cache_patch,
+    )
+
+    apply_qwen35_pcp_hybrid_kv_cache_patch()
+
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
     glm5_platform()
@@ -129,6 +135,14 @@ def register_router():
 def register_model():
     """Register FL-specific models not yet upstream."""
     _register_flagcx_connector()
+
+    from vllm_fl.patches.qwen35_pcp_triton_bringup import (
+        apply_qwen35_pcp_hybrid_kv_cache_patch,
+        apply_qwen35_pcp_triton_bringup_patch,
+    )
+
+    apply_qwen35_pcp_hybrid_kv_cache_patch()
+    apply_qwen35_pcp_triton_bringup_patch()
 
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
