@@ -98,6 +98,10 @@ def register():
     _patch_custom_ops()
     _patch_flash_attn_import()
     _patch_transformers_compat()
+    from vllm_fl.patches.moe_permute_scratch import (
+        apply_moe_permute_scratch_patch,
+    )
+    apply_moe_permute_scratch_patch()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
