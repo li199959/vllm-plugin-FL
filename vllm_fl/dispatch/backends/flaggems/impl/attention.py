@@ -40,7 +40,14 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.platforms.interface import DeviceCapability
-from flag_gems import flash_attn_varlen_func, reshape_and_cache_flash
+from flag_gems import reshape_and_cache_flash
+from vllm_fl.utils import use_fa3_attention
+# Opt-in (VLLM_FL_ATTN=fa3): route full-attention layers through the PPU-native
+# FlashAttention-3 package instead of FlagGems/Triton. Unset => unchanged.
+if use_fa3_attention():
+    from vllm_fl.ops.attention.fa3_adapter import flash_attn_varlen_func
+else:
+    from flag_gems import flash_attn_varlen_func
 # from vllm.attention.utils.fa_utils import flash_attn_varlen_func #reshape_and_cache_flash,
 # from flag_gems import reshape_and_cache_flash
 
@@ -74,7 +81,12 @@ class AttentionFLBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FL"
+        # vLLM 0.20.2's Attention.__init__ does
+        # ``AttentionBackendEnum[backend.get_name()]``, so the name MUST be a
+        # valid enum member. This backend is a (paged) flash-attention impl —
+        # report FLASH_ATTN so the lookup resolves. ("FL" is not a registered
+        # enum member and raised ValueError.)
+        return "FLASH_ATTN"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -420,6 +432,9 @@ class AttentionFLMetadataBuilder(AttentionMetadataBuilder[AttentionFLMetadata]):
 
 class AttentionFLImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+    # KV cache write happens via do_kv_cache_update(), not inside forward()
+    # (vLLM 0.20.2 split-KV design; forward only reads the paged cache).
+    forward_includes_kv_cache_update: bool = False
 
     def __init__(
         self,
@@ -467,6 +482,33 @@ class AttentionFLImpl(AttentionImpl):
             )
         ### TODO(lms): support quant to int8/int4 each query input and low precision compute
         self.supports_quant_query_input = False
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        # vLLM 0.20.2 split-KV design: the KV cache write is a separate op
+        # (unified_kv_cache_update) invoked before attention. Mirrors
+        # vllm.v1.attention.backends.flash_attn.FlashAttentionImpl.do_kv_cache_update.
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # Encoder attention uses direct Q/K/V without a KV cache.
+            return
+
+        key_cache, value_cache = kv_cache.unbind(0)
+        reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def forward(
         self,
@@ -532,34 +574,9 @@ class AttentionFLImpl(AttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
+        # KV cache write is handled separately via do_kv_cache_update()
+        # (vLLM 0.20.2 split-KV design). Here we only read from the cache.
         key_cache, value_cache = kv_cache.unbind(0)
-
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc

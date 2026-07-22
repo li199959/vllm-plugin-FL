@@ -208,6 +208,13 @@ class FlagGemsBackend(Backend):
             raise ValueError("use_sparse=True requires use_mla=True.")
         # TODO: return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
 
+        # Opt-in (VLLM_FL_ATTN=fa3): select the plugin's own FL attention
+        # backend, whose impl routes through the PPU-native FlashAttention-3
+        # adapter. Only full-attention (non-MLA/non-sparse) layers are affected.
+        from vllm_fl.utils import use_fa3_attention
+        if use_fa3_attention():
+            return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
+
         return AttentionBackendEnum.TRITON_ATTN.get_path()
 
     def moe_align_block_size(
