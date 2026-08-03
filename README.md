@@ -32,6 +32,7 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
 | Moore Threads | Supported | - |
 | Hygon | Supported | - |
 | Sunrise | Supported | - |
+| Enflame | Supported | - |
 
 ## Quick Start
 
@@ -154,7 +155,7 @@ import torch
 from vllm.config.compilation import CompilationConfig
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     prompts = [
         "Hello, my name is",
     ]

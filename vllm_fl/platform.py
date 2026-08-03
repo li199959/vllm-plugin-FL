@@ -5,6 +5,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import sys
 from typing import TYPE_CHECKING, TypeVar
 from typing_extensions import ParamSpec
 
@@ -21,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm_fl.dispatch import CachedOp
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -34,14 +36,34 @@ from vllm_fl.utils import DeviceInfo, get_device_name, get_device_type
 
 logger = init_logger(__name__)
 
+_attention_backend = CachedOp("attention_backend")
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 dist_backend_dict = {
     "npu": "hccl",
     "cuda": "nccl",
+    "gcu": "eccl",
     "musa": "mccl",
 }
+
+def _resolve_flagcx_backend() -> bool:
+    """Check whether the flagcx torch distributed backend is available."""
+    flagcx_path = os.environ.get("FLAGCX_PATH")
+    if not flagcx_path:
+        return False
+    try:
+        if flagcx_path not in sys.path:
+            sys.path.insert(0, flagcx_path)
+        import flagcx  # triggers _C.so load and backend registration
+        return torch.distributed.is_backend_available("flagcx")
+    except Exception:
+        logger.warning(
+            "FLAGCX_PATH=%s is set but flagcx torch backend could not be loaded.",
+            flagcx_path,
+        )
+        return False
 
 
 class PlatformFL(Platform):
@@ -61,7 +83,9 @@ class PlatformFL(Platform):
     torch_device_fn = device_info.torch_device_fn
     ray_device_key: str = "GPU"
     dist_backend: str = (
-        "flagcx" if "FLAGCX_PATH" in os.environ else dist_backend_dict.get(device_name, "nccl")
+        "flagcx"
+        if _resolve_flagcx_backend()
+        else dist_backend_dict.get(device_name, "nccl")
     )
     ### TODO(lms): dispatch device_control_env_var
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
@@ -74,6 +98,8 @@ class PlatformFL(Platform):
             return True
         if self.vendor_name == "hygon":
             return False
+        if self.vendor_name == "gcu":
+            return True
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
@@ -84,6 +110,12 @@ class PlatformFL(Platform):
         if hasattr(torch, 'musa') and torch.musa.is_available():
             return True
         return False
+
+    def is_gcu(self) -> bool:
+        if hasattr(torch, 'gcu') and torch.gcu.is_available():
+            return True
+        return False
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -121,7 +153,7 @@ class PlatformFL(Platform):
     ### TODO(lms): change pin_memory depend device
     @classmethod
     def is_pin_memory_available(cls):
-        if cls.device_type in ["cuda", "xpu", "npu", "musa"]:
+        if cls.device_type in ["cuda", "xpu", "npu", "musa", "txda", "gcu"]:
             return True
         return False
 
@@ -206,6 +238,36 @@ class PlatformFL(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
+        # Ascend NPU: torch_npu inductor codegen has issues with
+        # multi-device compilation (e.g. reduction scheduling on npu:1).
+        # Disable torch.compile and CUDAGraphs until torch_npu inductor
+        # is stable. check_and_update_config runs after VllmConfig.__init__
+        # processes enforce_eager, so we must set compilation_config directly.
+        if cls.device_type == "npu":
+            from vllm.config import CompilationMode
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.warning(
+                    "Disabling torch.compile for Ascend NPU to avoid "
+                    "torch_npu inductor codegen issues."
+                )
+                compilation_config.mode = CompilationMode.NONE
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        # Ascend NPU: force float32 SSM state cache for GDN linear attention.
+        # The pure-PyTorch recurrence accumulates state in float32 but writes
+        # back to initial_state.dtype each step. If the cache is bf16, the
+        # round-trip truncation compounds across hundreds of tokens, degrading
+        # output quality (especially at temperature > 0). Forcing float32 cache
+        # eliminates this precision loss with negligible memory impact (the SSM
+        # state is small relative to the KV cache).
+        if cls.device_type == "npu":
+            if cache_config and cache_config.mamba_ssm_cache_dtype is None:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.info(
+                    "Forcing mamba_ssm_cache_dtype to float32 for Ascend NPU "
+                    "to avoid recurrence precision loss in GDN decode."
+                )
+
         if (
             cls.device_type == "musa"
             and compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -247,6 +309,9 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
 
+        if cls.vendor_name == "gcu":
+            parallel_config.disable_custom_all_reduce = True
+
     @classmethod
     def get_attn_backend_cls(
         cls,
@@ -255,12 +320,10 @@ class PlatformFL(Platform):
         num_heads: int | None = None,
     ) -> str:
         """Get the attention backend class path using the dispatch mechanism."""
-        from vllm_fl.dispatch import call_op
-
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
 
-        backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
+        backend_path = _attention_backend(use_mla=use_mla, use_sparse=use_sparse)
 
         logger.info_once(
             "Using attention backend via dispatch (use_mla=%s, use_sparse=%s): %s",
@@ -333,7 +396,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead"]:
+        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead", "gcu"]:
             return True
         return False
 
@@ -382,11 +445,26 @@ class PlatformFL(Platform):
     def pre_register_and_update(cls, parser=None) -> None:
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend
+        elif cls.device_name == "gcu":
+            import vllm_fl.dispatch.backends.vendor.gcu  # noqa: F401
 
+    @classmethod
     def supports_fp8(cls) -> bool:
-        if cls.vendor_name == "nvidia":
+        """Return whether the current device architecture supports FP8."""
+        if cls.vendor_name == "mthreads":
             return True
-        return False
+
+        if cls.vendor_name == "gcu":
+            cc = cls.get_device_capability()
+            return cc is not None and cc.major >= 4
+
+        if cls.vendor_name != "nvidia":
+            return False
+        try:
+            capability = cls.get_device_capability()
+        except (AttributeError, RuntimeError):
+            return False
+        return capability is not None and capability >= DeviceCapability(8, 9)
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
@@ -429,9 +507,18 @@ class PlatformFL(Platform):
         if cls.device_type == "musa":
             major, minor = torch.musa.get_device_capability(device_id)
             return DeviceCapability(major=major, minor=minor)
+        if cls.device_type == "txda":
+            major, minor = torch.txda.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
         # TODO: For PTPU/Sunrise devices, return None
         if cls.device_type == "ptpu":
-            return None
+            return None        
+        if cls.device_type == "gcu":
+            gcu = getattr(torch, "gcu", None)
+            if gcu is None:
+                return None
+            major, minor = gcu.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 

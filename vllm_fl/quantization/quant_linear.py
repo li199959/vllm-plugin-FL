@@ -1,6 +1,13 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
+import os
 from vllm.platforms import PlatformEnum, current_platform
+from vllm_fl.utils import use_flaggems_op
+
+from .fp8 import FlagGemsFp8BlockScaledMMLinearKernel
+
+
+FLAGGEMS_FP8_BLOCK_GEMM_OP = "flaggems_fp8_block_gemm"
 
 
 def _resolve_source_platform() -> PlatformEnum:
@@ -58,3 +65,21 @@ def add_oot_quant_kernel() -> None:
         _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT] = list(
             _POSSIBLE_FP8_BLOCK_KERNELS.get(source, [])
         )
+
+    if (
+        current_platform.supports_fp8()
+        and use_flaggems_op(FLAGGEMS_FP8_BLOCK_GEMM_OP)
+        and FlagGemsFp8BlockScaledMMLinearKernel
+        not in _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT]
+    ):
+        _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT].insert(
+            0, FlagGemsFp8BlockScaledMMLinearKernel
+        )
+
+    # WNA16 hooks below are self-gated on kernel availability and are a
+    # no-op until the plugin's csrc-side operators are built.
+    from .wna16.linear import register_fl_wna16_linear_kernel
+    from .compressed_tensors import register_compressed_tensors_oot
+
+    register_fl_wna16_linear_kernel(_POSSIBLE_KERNELS)
+    register_compressed_tensors_oot()

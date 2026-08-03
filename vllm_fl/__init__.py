@@ -117,8 +117,10 @@ def register():
 def register_quant_linear():
     from vllm.platforms import current_platform
     # vllm.model_executor.kernels.linear triggers cutlass_scaled_mm_supports_fp8
-    # at module level, which requires torch.ops._C — not available on MUSA.
+    # at module level, which requires torch.ops._C — not available on MUSA and Tsingmicro.
     if current_platform.device_type == "musa":
+        return
+    elif current_platform.device_type == "txda":
         return
     from vllm_fl.quantization.quant_linear import add_oot_quant_kernel
     add_oot_quant_kernel()
@@ -136,6 +138,8 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    from vllm import ModelRegistry
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
@@ -152,3 +156,22 @@ def register_model():
         #glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
+
+    # Register DeepseekV4 model
+    try:
+        ModelRegistry.register_model(
+            "DeepseekV4ForCausalLM",
+            "vllm_fl.models.deepseek_v4:DeepseekV4ForCausalLM"
+        )
+    except Exception as e:
+        logger.error(f"Register DeepseekV4 model error: {str(e)}")
+
+
+    # Register DeepseekV4 model
+    try:
+        ModelRegistry.register_model(
+            "DeepSeekV4MTPModel",
+            "vllm_fl.models.deepseek_v4_mtp:DeepSeekV4MTP"
+        )
+    except Exception as e:
+        logger.error(f"Register DeepseekV4 model error: {str(e)}")
