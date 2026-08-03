@@ -13,6 +13,10 @@ fl_vllm_environment_variables: dict[str, Callable[[], Any]] = {
         "FLAGGEMS_ENABLE_OPLIST_PATH", "/tmp/flaggems_enable_oplist.txt"
     ),
     "USE_FLAGGEMS": use_flaggems,
+    "VLLM_FL_FLAGOS_ATEN_DISABLED": lambda: (
+        os.environ.get("VLLM_FL_FLAGOS_ATEN_DISABLED", "False").lower()
+        in ("true", "1")
+    ),
 }
 
 

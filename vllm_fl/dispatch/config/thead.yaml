@@ -26,10 +26,10 @@ strict: false
 #   - vendor        : Any available vendor backend (auto-detected)
 #   - vendor:cuda   : CUDA-specific vendor backend
 op_backends:
-  # attention_backend: prioritize flagos (Triton attention)
+  # attention_backend: prioritize vendor (PPU FA3 via thead backend)
   attention_backend:
-    - flagos
     - vendor
+    - flagos
     - reference
   rms_norm:
     - flagos

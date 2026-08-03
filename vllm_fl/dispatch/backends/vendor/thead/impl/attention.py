@@ -183,12 +183,6 @@ def reshape_and_cache_flash_thead(
     """
     del kv_cache_dtype, k_scale, v_scale  # unused in pure-torch path
 
-    num_kv_heads = key.shape[1]
-    head_size = key.shape[2]
-
-    # Zero out key/value for padding slots (slot_mapping == -1), then map
-    # -1 to slot 0 so that every token writes somewhere.  Writing zeros to
-    # slot 0 for padding tokens is harmless.
     valid_mask_gpu = (slot_mapping >= 0).to(key.dtype).view(-1, 1, 1)
     masked_key = key * valid_mask_gpu
     masked_value = value * valid_mask_gpu
@@ -201,12 +195,8 @@ def reshape_and_cache_flash_thead(
     block_indices = safe_slots // block_size
     token_in_block = safe_slots % block_size
 
-    # Write each kv_head separately — this avoids flattening the entire
-    # cache into a 2D tensor, which would create a ~2.5 GiB temporary
-    # copy on non-contiguous cache layouts (e.g. HND stride order).
-    for h in range(num_kv_heads):
-        key_cache[block_indices, token_in_block, h, :] = masked_key[:, h, :]
-        value_cache[block_indices, token_in_block, h, :] = masked_value[:, h, :]
+    key_cache[block_indices, token_in_block] = masked_key
+    value_cache[block_indices, token_in_block] = masked_value
 
 
 _flash_attn_mod.reshape_and_cache_flash = reshape_and_cache_flash_thead

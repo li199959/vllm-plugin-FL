@@ -242,38 +242,48 @@ class WorkerFL(WorkerBase):
         if fl_envs.USE_FLAGGEMS:
             import flag_gems
 
-            # Get whitelist and blacklist from environment variables
-            whitelist, blacklist = get_flag_gems_whitelist_blacklist()
+            aten_disabled = os.environ.get(
+                "VLLM_FL_FLAGOS_ATEN_DISABLED", ""
+            ).lower() in ("true", "1")
 
-            # Only rank 0 records the oplist to avoid file truncation and
-            # interleaved writes when tensor-parallel-size > 1.
-            should_record = (rank == 0)
-
-            # Use whitelist if specified (takes precedence over blacklist)
-            if whitelist:
-                logger.info(f"[FlagGems] Enable only the following ops: {whitelist}")
-                flag_gems.only_enable(
-                    include=whitelist,
-                    record=should_record,
-                    once=True,
-                    path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
-                )
-            elif blacklist:
-                logger.info(f"[FlagGems] Disable the following ops: {blacklist}")
-                flag_gems.enable(
-                    unused=blacklist,
-                    record=should_record,
-                    once=True,
-                    path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
+            if aten_disabled:
+                logger.info(
+                    "[FlagGems] All basic aten ops disabled "
+                    "(VLLM_FL_FLAGOS_ATEN_DISABLED=1), "
+                    "only fused ops via dispatch framework remain active."
                 )
             else:
-                logger.info("[FlagGems] Enable all ops")
-                flag_gems.enable(
-                    record=should_record, once=True, path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH
-                )
+                # Get whitelist and blacklist from environment variables
+                whitelist, blacklist = get_flag_gems_whitelist_blacklist()
+
+                # Only rank 0 records the oplist to avoid file truncation and
+                # interleaved writes when tensor-parallel-size > 1.
+                should_record = (rank == 0)
+
+                # Use whitelist if specified (takes precedence over blacklist)
+                if whitelist:
+                    logger.info(f"[FlagGems] Enable only the following ops: {whitelist}")
+                    flag_gems.only_enable(
+                        include=whitelist,
+                        record=should_record,
+                        once=True,
+                        path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
+                    )
+                elif blacklist:
+                    logger.info(f"[FlagGems] Disable the following ops: {blacklist}")
+                    flag_gems.enable(
+                        unused=blacklist,
+                        record=should_record,
+                        once=True,
+                        path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
+                    )
+                else:
+                    logger.info("[FlagGems] Enable all ops")
+                    flag_gems.enable(
+                        record=should_record, once=True, path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH
+                    )
 
     # def sleep(self, level: int = 1) -> None:
-    #     TODO(lms): rewrite CuMemAllocator
     #     from vllm.device_allocator.cumem import CuMemAllocator
 
     #     free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
