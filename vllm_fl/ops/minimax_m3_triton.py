@@ -338,7 +338,10 @@ def probe_triton_m3_fused() -> bool:
     whether the eager-break wrap is needed."""
     import os
 
-    if os.environ.get("VLLM_FL_M3_FUSED_IMPL", "triton") == "torch":
+    # Opt-in: the triton kernel survives all standalone tests but hit an
+    # illegal memory access under cudagraph capture in serving (bisected:
+    # torch impl + graphs is stable; kernel + graphs is not). Default off.
+    if os.environ.get("VLLM_FL_M3_FUSED_IMPL", "torch") != "triton":
         return False
     try:
         from vllm_fl.ops.minimax_m3_ops import (
