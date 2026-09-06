@@ -35,6 +35,21 @@ OOT_OPS = {
     # "unquantized_fused_moe_method": (UnquantizedFusedMoEMethodFL, "UnquantizedFusedMoEMethod"),
 }
 
+def _apply_minimax_m3_eager_break() -> None:
+    """Wrap the MiniMax-M3 fused op with eager_break_during_capture.
+
+    Deferred to worker init: vllm.compilation.breakable_cudagraph cannot be
+    imported during early plugin registration (circular import), and the
+    pure-torch fallback must stay out of breakable-cudagraph captures.
+    """
+    try:
+        from vllm_fl.patches.minimax_m3 import _apply_fused_op_eager_break
+
+        _apply_fused_op_eager_break()
+    except Exception as e:
+        logger.warning("M3 fused-op eager-break wrap failed: %s", e)
+
+
 def _patch_unquantized_moe_oracle() -> None:
     """
     Monkey-patch the upstream select_unquantized_moe_backend so it does not
@@ -72,6 +87,10 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     so it picks native CUDA backends instead of returning (OOT, None).
     """
     from vllm_fl.utils import get_oot_blacklist, get_oot_whitelist, is_oot_enabled, use_flaggems_op
+
+    # Deferred M3 fused-op eager-break wrap: breakable_cudagraph is not
+    # importable during early plugin load, so bind it once workers are up.
+    _apply_minimax_m3_eager_break()
 
     # Check if OOT registration is enabled
     if not is_oot_enabled():

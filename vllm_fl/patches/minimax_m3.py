@@ -45,7 +45,32 @@ def _forward_static_partial(
 
 def apply_patches() -> None:
     """Patch ApplyRotaryEmb for partial RoPE (idempotent across processes)."""
-    if getattr(ApplyRotaryEmb, "_fl_partial_rope_patched", False):
+    if not getattr(ApplyRotaryEmb, "_fl_partial_rope_patched", False):
+        ApplyRotaryEmb.forward_static = staticmethod(_forward_static_partial)
+        ApplyRotaryEmb._fl_partial_rope_patched = True
+    _apply_fused_op_eager_break()
+
+
+def _apply_fused_op_eager_break() -> None:
+    """Keep the pure-torch M3 fused op out of breakable-cudagraph captures.
+
+    The fallback mutates ``qkv`` in place and its cache inserts branch on
+    ``slot_mapping >= 0`` data (padding slots are -1 on replay), which must
+    be evaluated eagerly every step. ``eager_break_during_capture`` fits the
+    op's contract exactly (in-place, no return value).
+    """
+    try:
+        from vllm.compilation.breakable_cudagraph import (
+            eager_break_during_capture,
+        )
+    except ImportError:
         return
-    ApplyRotaryEmb.forward_static = staticmethod(_forward_static_partial)
-    ApplyRotaryEmb._fl_partial_rope_patched = True
+
+    import vllm._custom_ops as ops
+
+    fn = ops.fused_minimax_m3_qknorm_rope_kv_insert
+    if getattr(fn, "_fl_eager_break", False):
+        return
+    wrapped = eager_break_during_capture(fn)
+    wrapped._fl_eager_break = True
+    ops.fused_minimax_m3_qknorm_rope_kv_insert = wrapped
