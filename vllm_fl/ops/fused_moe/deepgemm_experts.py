@@ -43,7 +43,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M,
     ep_gather,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 
 from vllm_fl.ops.fused_moe.activation import apply_moe_activation
