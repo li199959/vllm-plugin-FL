@@ -70,6 +70,26 @@ def _to_fp8_storage(x32: torch.Tensor, kv_cache_dtype: str) -> torch.Tensor:
     ).view(torch.uint8)
 
 
+_TRITON_MODE: bool | None = None
+
+
+def resolve_triton_mode(probe: bool = True) -> bool:
+    """Decide once (worker init / first call) whether the triton kernel runs
+    the fused op. Self-verified against this torch fallback on first use."""
+    global _TRITON_MODE
+    if _TRITON_MODE is not None:
+        return _TRITON_MODE
+    if not probe:
+        return False
+    try:
+        from vllm_fl.ops.minimax_m3_triton import probe_triton_m3_fused
+
+        _TRITON_MODE = probe_triton_m3_fused()
+    except Exception:
+        _TRITON_MODE = False
+    return _TRITON_MODE
+
+
 def _fused_minimax_m3_qknorm_rope_kv_insert(
     qkv: torch.Tensor,
     q_norm_weight: torch.Tensor,
@@ -92,6 +112,36 @@ def _fused_minimax_m3_qknorm_rope_kv_insert(
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
 ) -> None:
+    if _TRITON_MODE is None:
+        resolve_triton_mode()
+    if _TRITON_MODE:
+        from vllm_fl.ops.minimax_m3_triton import (
+            triton_fused_minimax_m3_qknorm_rope_kv_insert as _triton_impl,
+        )
+
+        _triton_impl(
+            qkv,
+            q_norm_weight,
+            k_norm_weight,
+            cos_sin_cache,
+            positions,
+            num_heads,
+            num_kv_heads,
+            rotary_dim,
+            eps,
+            index_q_norm_weight,
+            index_k_norm_weight,
+            num_index_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            index_cache,
+            block_size,
+            q_out,
+            index_q_out,
+            kv_cache_dtype,
+        )
+        return
     num_tokens = qkv.shape[0]
     nq, nkv, niq = int(num_heads), int(num_kv_heads), int(num_index_heads)
     has_index = niq > 0

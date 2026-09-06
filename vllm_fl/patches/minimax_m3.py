@@ -52,13 +52,17 @@ def apply_patches() -> None:
 
 
 def _apply_fused_op_eager_break() -> None:
-    """Keep the pure-torch M3 fused op out of breakable-cudagraph captures.
+    """Keep the M3 fused op out of breakable-cudagraph captures when the
+    pure-torch fallback is in charge.
 
-    The fallback mutates ``qkv`` in place and its cache inserts branch on
-    ``slot_mapping >= 0`` data (padding slots are -1 on replay), which must
-    be evaluated eagerly every step. ``eager_break_during_capture`` fits the
-    op's contract exactly (in-place, no return value).
+    With the triton kernel active (self-verified at worker init) the op is
+    capture-safe and joins the graphed region — no break needed.
     """
+    from vllm_fl.ops.minimax_m3_ops import resolve_triton_mode
+
+    if resolve_triton_mode():
+        return  # triton kernel: capture-safe, no eager break
+
     try:
         from vllm.compilation.breakable_cudagraph import (
             eager_break_during_capture,
