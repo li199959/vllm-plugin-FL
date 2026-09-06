@@ -104,7 +104,10 @@ def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig,
         from vllm_fl.utils import use_deepgemm_moe
         if use_deepgemm_moe():
             from vllm_fl.ops.fused_moe.deepgemm_experts import DeepGemmExpertsFL
+
+            logger.info_once("Using DeepGemmExpertsFL (VLLM_FL_MOE=deepgemm)")
             return UnquantizedMoeBackend.TRITON, DeepGemmExpertsFL
+        logger.info_once("Using TritonExpertsFL (FlagGems Triton fused_moe)")
         return UnquantizedMoeBackend.TRITON, TritonExpertsFL
 
     if moe_config.is_lora_enabled:
