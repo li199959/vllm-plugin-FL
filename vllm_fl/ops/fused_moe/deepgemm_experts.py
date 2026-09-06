@@ -98,6 +98,9 @@ class DeepGemmExpertsFL(TritonExperts):
         assert hidden_states.dtype == torch.bfloat16, (
             "DeepGemmExpertsFL only supports bf16 unquantized MoE"
         )
+        from vllm.logger import init_logger as _il
+
+        _il(__name__).info_once("DeepGemmExpertsFL.apply first call")
         assert hidden_states.is_contiguous()
         assert expert_map is None, (
             "DeepGemmExpertsFL does not support expert parallelism (expert_map)"

@@ -98,6 +98,9 @@ def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig,
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
+    logger.info_once(
+        "select_unquantized_moe_backend_oot called (flaggems=%s)", use_flaggems()
+    )
     if current_platform.is_out_of_tree() and use_flaggems():
         # Opt-in (VLLM_FL_MOE=deepgemm): route BF16 experts through the
         # PPU-native DeepGEMM grouped GEMM instead of FlagGems Triton fused_moe.
