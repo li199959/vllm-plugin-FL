@@ -58,13 +58,14 @@ def _topk_routing(
     selected = torch.zeros(
         num_tokens, num_experts, dtype=torch.bool, device=scores.device
     )
-    rows = torch.arange(num_tokens, device=scores.device).unsqueeze(1)
     index_list = []
     for _ in range(topk):
         masked = scores_for_choice.masked_fill(selected, float("-inf"))
         expert = torch.argmax(masked, dim=-1)
         index_list.append(expert)
-        selected[rows, expert.unsqueeze(1)] = True
+        # scatter_ (not setitem): boolean advanced indexing goes through an
+        # index_put_ path that is not capturable on this stack.
+        selected.scatter_(1, expert.unsqueeze(1), True)
     indices = torch.stack(index_list, dim=1)
 
     weights = scores.gather(1, indices)
