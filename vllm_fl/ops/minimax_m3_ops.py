@@ -150,11 +150,29 @@ def _fused_minimax_m3_qknorm_rope_kv_insert(
         return
 
     # ── Paged cache inserts (sparse serving). ─────────────────────────────
-    # Guard the empty/padding cases: warmup and cudagraph dummy runs can pass
-    # batches whose slots are all -1 (or zero tokens), and empty index tensors
-    # break the advanced-indexing broadcast.
-    mask = slot_mapping >= 0 if slot_mapping is not None else None
-    if mask is not None and bool(mask.any()):
+    # During breakable-cudagraph capture this op runs eagerly on the capture
+    # stream where host syncs are illegal, so boolean-mask selection
+    # (nonzero() syncs) must be avoided: capture dummies use all-zero slots,
+    # so write every row via clamped indices (harmless on the dummy buffers).
+    # At replay the callable re-runs eagerly and the guarded path applies.
+    capturing = torch.cuda.is_current_stream_capturing()
+    mask = slot_mapping >= 0
+    if capturing:
+        sm_safe = slot_mapping.clamp(min=0)
+        block = sm_safe // block_size
+        token = sm_safe % block_size
+        head_idx = torch.arange(nkv, device=qkv.device).view(1, nkv)
+        if kv_cache.dtype == torch.uint8:
+            k_store = _to_fp8_storage(k_new, kv_cache_dtype)
+            v_store = _to_fp8_storage(
+                qkv_v[:, nq + nkv : nq + 2 * nkv].float(), kv_cache_dtype
+            )
+        else:
+            k_store = k_new_dt
+            v_store = qkv_v[:, nq + nkv : nq + 2 * nkv]
+        kv_cache[block.unsqueeze(1), 0, token.unsqueeze(1), head_idx, :] = k_store
+        kv_cache[block.unsqueeze(1), 1, token.unsqueeze(1), head_idx, :] = v_store
+    elif bool(mask.any()):
         sm = slot_mapping[mask]
         block = sm // block_size
         token = sm % block_size
@@ -175,27 +193,33 @@ def _fused_minimax_m3_qknorm_rope_kv_insert(
     idx_sm = (
         index_slot_mapping if index_slot_mapping is not None else slot_mapping
     )
-    idx_mask = idx_sm >= 0 if idx_sm is not None else None
-    if idx_mask is not None and bool(idx_mask.any()):
-        ik_flat = ik_new[idx_mask].squeeze(1)  # single head -> [M, 128]
-        # The manager allocates the index cache as [nb, bs, 128] (3D); the
-        # CUDA kernel addresses it flat. Flatten for the row-wise copy.
-        head_dim = ik_flat.shape[-1]
-        flat_cache = index_cache.view(-1, head_dim)
+    idx_mask = idx_sm >= 0
+    head_dim = ik_new.shape[-1]
+    flat_cache = index_cache.view(-1, head_dim)
+    if index_cache.dtype == torch.float8_e4m3fn:
+        vals = (
+            ik_new.squeeze(1)
+            .clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+            .to(torch.float8_e4m3fn)
+        )
+    else:
+        vals = ik_new.squeeze(1).to(index_cache.dtype)
+    if capturing:
+        sel = idx_sm.clamp(min=0)
         if index_cache.dtype == torch.float8_e4m3fn:
-            # Row-wise copy via the uint8 bit-view: torch's index_copy_ has
-            # no fp8 kernel, and FlagGems' index_put_ mishandles fp8 values.
             flat_cache.view(torch.uint8).index_copy_(
-                0,
-                idx_sm[idx_mask],
-                ik_flat.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
-                .to(torch.float8_e4m3fn)
-                .view(torch.uint8),
+                0, sel, vals.view(torch.uint8)
             )
         else:
-            flat_cache.index_copy_(
-                0, idx_sm[idx_mask], ik_flat.to(index_cache.dtype)
+            flat_cache.index_copy_(0, sel, vals)
+    elif bool(idx_mask.any()):
+        sel_vals = vals[idx_mask]
+        if index_cache.dtype == torch.float8_e4m3fn:
+            flat_cache.view(torch.uint8).index_copy_(
+                0, idx_sm[idx_mask], sel_vals.view(torch.uint8)
             )
+        else:
+            flat_cache.index_copy_(0, idx_sm[idx_mask], sel_vals)
 
 
 def register_minimax_m3_ops() -> None:
