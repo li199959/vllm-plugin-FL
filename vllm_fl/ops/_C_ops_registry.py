@@ -64,6 +64,18 @@ def register_op_schemas():
         except ImportError:
             logger.warning("Failed to import mcoplib._C")
 
+    # MiniMax-M3 fused op + _moe_C topk routing ops: schemas + pure-torch
+    # CUDA fallbacks. Self-guarded, registered independently of the generated
+    # schema list.
+    try:
+        from vllm_fl.ops.minimax_m3_ops import register_minimax_m3_ops
+        from vllm_fl.ops.moe_topk_ops import register_moe_topk_ops
+
+        register_minimax_m3_ops()
+        register_moe_topk_ops()
+    except Exception as e:
+        logger.warning("Failed to register FL fallback ops: %s", e)
+
     from vllm_fl.ops._C_ops_schemas import SCHEMAS as schemas
 
     if not schemas:

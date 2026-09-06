@@ -313,15 +313,22 @@ class PlatformFL(Platform):
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
 
-        # Try FlashAttention first
+        # Try FlashAttention first, but only when the FA2 C extension is
+        # actually importable. On OOT builds ``get_class()`` succeeds even
+        # though ``vllm.vllm_flash_attn`` is only partially initialized (the
+        # ``_vllm_fa2_C`` .so is missing), which would select FLASH_ATTN and
+        # poison the is_flash_attn_backend branches that assume a working
+        # flash_attn_varlen_func.
         if (cc := cls.get_device_capability()) and cc.major >= 8:
             try:
                 backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
                 if backend_class.supports_head_size(
                     head_size
                 ) and backend_class.supports_dtype(dtype):
+                    import vllm.vllm_flash_attn._vllm_fa2_C  # noqa: F401
+
                     return AttentionBackendEnum.FLASH_ATTN
-            except ImportError:
+            except (ImportError, OSError):
                 pass
 
         return AttentionBackendEnum.TORCH_SDPA

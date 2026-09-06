@@ -450,7 +450,12 @@ class TritonExpertsFL(TritonExperts):
             )
 
         apply_moe_activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N),
+            clamp_limit=getattr(self.quant_config, "gemm1_clamp_limit", None),
+            alpha=getattr(self.quant_config, "gemm1_alpha", None),
+            beta=getattr(self.quant_config, "gemm1_beta", None),
         )
 
         a2q_scale: torch.Tensor | None = None
