@@ -129,7 +129,16 @@ class DeepGemmExpertsFL(TritonExperts):
         # ---- activation: silu_and_mul -> [M_sum, I] ----
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         act_out = _resize_cache(workspace13, (M_sum, activation_out_dim))
-        apply_moe_activation(activation, act_out, mm1_out.view(-1, N))
+        # Thread the SwiGLU gate params (MiniMax-M3 swigluoai_uninterleave:
+        # clamp=7.0, alpha=1.702, beta=1.0) from the layer's quant config.
+        apply_moe_activation(
+            activation,
+            act_out,
+            mm1_out.view(-1, N),
+            clamp_limit=self.gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+        )
 
         # ---- grouped GEMM 2 (nopad): [M_sum, I] x [E, K, I]^T -> [M_sum, K] ----
         mm2_out = _resize_cache(workspace2, (M_sum, K))
