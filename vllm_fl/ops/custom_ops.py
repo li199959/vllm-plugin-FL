@@ -35,6 +35,41 @@ OOT_OPS = {
     # "unquantized_fused_moe_method": (UnquantizedFusedMoEMethodFL, "UnquantizedFusedMoEMethod"),
 }
 
+def _disable_flaggems_runtime_autotune() -> None:
+    """Pin flag_gems LibTuner to its first config (no runtime benchmarking).
+
+    The REPLAY benchmark protocol captures cudagraphs at first-seen shapes
+    mid-serving; under heavy mixed load it hit an illegal memory access
+    (flagtune do_bench_cudagraph replay) and killed the engine. Skipping the
+    bench keeps serving deterministic; opt back in with
+    VLLM_FL_FLAGGEMS_AUTOTUNE=1 (tuning should then be done offline).
+    """
+    import os
+
+    if os.environ.get("VLLM_FL_FLAGGEMS_AUTOTUNE", "0") == "1":
+        return
+    try:
+        from flag_gems.utils.libentry import LibTuner
+
+        if getattr(LibTuner, "_fl_no_autotune", False):
+            return
+
+        def _policy_first_config(self, fn, configs, args, kwargs):
+            cfg = next(iter(configs), None)
+            if cfg is None:
+                cfg = self.configs[0]
+            return cfg, {}
+
+        LibTuner.policy = _policy_first_config
+        LibTuner._fl_no_autotune = True
+        logger.info(
+            "FlagGems runtime autotune disabled (first-config pinned); "
+            "set VLLM_FL_FLAGGEMS_AUTOTUNE=1 to re-enable."
+        )
+    except Exception as e:
+        logger.warning("Failed to disable FlagGems autotune: %s", e)
+
+
 def _apply_minimax_m3_eager_break() -> None:
     """Wrap the MiniMax-M3 fused op with eager_break_during_capture.
 
@@ -87,6 +122,10 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     so it picks native CUDA backends instead of returning (OOT, None).
     """
     from vllm_fl.utils import get_oot_blacklist, get_oot_whitelist, is_oot_enabled, use_flaggems_op
+
+    # Must run before flag_gems.enable() below: pin LibTuner before any
+    # kernel gets its first (tuning) call.
+    _disable_flaggems_runtime_autotune()
 
     # Deferred M3 fused-op eager-break wrap: breakable_cudagraph is not
     # importable during early plugin load, so bind it once workers are up.
