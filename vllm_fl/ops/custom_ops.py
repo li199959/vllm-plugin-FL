@@ -3,13 +3,16 @@
 import logging
 from typing import Optional, List
 
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from .layernorm import *  # noqa F403 F401
 from .activation import *  # noqa F403 F401
 from .rotary_embedding import *  # noqa F403 F401
 from .fused_moe import *  # noqa F403 F401
 
-logger = logging.getLogger(__name__)
+# vllm logger (not stdlib) so INFO registration logs are actually emitted.
+logger = init_logger(__name__)
+_ = logging.getLogger(__name__ + ".unused")
 
 # Mapping from OOT operator name (op_name, internal/whitelist) to (class, registration_name).
 # registration_name is passed to CustomOp.register_oot and must match what vLLM uses
