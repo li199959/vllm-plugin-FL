@@ -285,6 +285,16 @@ def register_minimax_m3_ops() -> None:
     except (ImportError, OSError):
         pass
 
+    # The standalone native extension (vllm_fl._m3_fused_C) registers the
+    # same op at import; the pure-torch fallback steps aside for it.
+    try:
+        import vllm_fl._m3_fused_C  # noqa: F401
+
+        register_minimax_m3_ops._done = True
+        return
+    except (ImportError, OSError):
+        pass
+
     lib = torch.library.Library("_C", "FRAGMENT")
     lib.define(SCHEMA)
     lib.impl(

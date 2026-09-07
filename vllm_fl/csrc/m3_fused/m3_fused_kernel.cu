@@ -150,19 +150,48 @@ __device__ __forceinline__ void storeElems(
   *reinterpret_cast<uint2*>(dst) = v;
 }
 
-// Store 4 fp32 -> 4 E4M3 bytes (saturating to ±448). No scale: RMSNorm
-// outputs are O(1) and the score path only needs relative block ordering.
+// Software fp32 -> e4m3 (satfinite, RNE) encoder: the PPU toolchain
+// miscompiles the __nv_cvt intrinsic, so emit the byte via integer ops
+// (bit-exact vs torch's .to(float8_e4m3fn) across a 4.2M-value sweep).
+__device__ __forceinline__ uint8_t f32ToE4M3(float xf) {
+  xf = fminf(fmaxf(xf, -448.0f), 448.0f);
+  uint32_t u_all = __float_as_uint(xf);
+  uint8_t sign = static_cast<uint8_t>((u_all >> 31) << 7);
+  uint32_t u = u_all & 0x7FFFFFFFu;
+  int e_f = static_cast<int>((u >> 23) & 255u) - 127;
+  uint32_t m_full = (u & 0x7FFFFFu) | 0x800000u;  // implicit leading 1
+
+  // normal: 3-bit mantissa, RNE on the dropped 20 bits
+  uint32_t mant = (m_full >> 20) & 7u;
+  uint32_t rem = m_full & 0xFFFFFu;
+  uint32_t half = 1u << 19;
+  bool round_up = (rem > half) || ((rem == half) && ((mant & 1u) == 1u));
+  mant += round_up ? 1u : 0u;  // may carry into the exponent
+  int e4n = e_f + 7 + static_cast<int>(mant >> 3);
+  mant &= 7u;
+  uint8_t normal_bits = static_cast<uint8_t>((e4n << 3) | mant);
+  bool is_normal = (e_f >= -6) && (e4n <= 15);
+
+  // subnormal / zero: round(|x| * 2^9); 8 carries into the smallest normal.
+  float ax = fabsf(xf);
+  int sub = static_cast<int>(ax * 512.0f + 0.5f);
+  uint8_t sub_bits = static_cast<uint8_t>(sub > 8 ? 8 : sub);
+
+  return sign | (is_normal ? normal_bits : sub_bits);
+}
+
+// Store 4 fp32 -> 4 E4M3 bytes (saturating to ±448), packed into one uint32
+// store: scalar per-byte stores are miscompiled by the PPU toolchain (same
+// as scalar bf16 stores). No scale: RMSNorm outputs are O(1) and the score
+// path only needs relative block ordering.
 __device__ __forceinline__ void storeElemsFp8(
     uint8_t* __restrict__ dst, float const (&elems)[kElemsPerLane]) {
-  constexpr float kFp8Max = 448.0f;
-  int const laneId = threadIdx.x % 32;
-  int const dim_base = laneId * kElemsPerLane;
+  uint32_t packed = 0u;
 #pragma unroll
   for (int i = 0; i < kElemsPerLane; i++) {
-    float vv = fminf(fmaxf(elems[i], -kFp8Max), kFp8Max);
-    dst[dim_base + i] =
-        static_cast<uint8_t>(__nv_cvt_float_to_fp8(vv, __NV_SATFINITE, __NV_E4M3));
+    packed |= static_cast<uint32_t>(f32ToE4M3(elems[i])) << (8 * i);
   }
+  *reinterpret_cast<uint32_t*>(dst) = packed;
 }
 
 // ── kernel (verbatim modulo PDL) ────────────────────────────────────────────

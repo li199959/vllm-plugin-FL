@@ -62,6 +62,15 @@ def _apply_fused_op_eager_break() -> None:
     """
     import os
 
+    # Native kernel (vllm_fl._m3_fused_C) is capture-safe by design: it joins
+    # the graphed region like upstream NVIDIA does.
+    try:
+        import vllm_fl._m3_fused_C  # noqa: F401
+
+        return
+    except (ImportError, OSError):
+        pass
+
     from vllm_fl.ops.minimax_m3_ops import resolve_triton_mode
 
     if resolve_triton_mode() and os.environ.get(

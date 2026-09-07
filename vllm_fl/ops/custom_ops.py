@@ -123,6 +123,15 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     """
     from vllm_fl.utils import get_oot_blacklist, get_oot_whitelist, is_oot_enabled, use_flaggems_op
 
+    # Activate the native M3 fused kernel (registers _C::fused_minimax_m3_*)
+    # before anything registers the python fallback.
+    try:
+        import vllm_fl._m3_fused_C  # noqa: F401
+
+        logger.info_once("Native M3 fused kernel active (vllm_fl._m3_fused_C)")
+    except (ImportError, OSError) as e:
+        logger.debug("vllm_fl._m3_fused_C unavailable: %s", e)
+
     # Must run before flag_gems.enable() below: pin LibTuner before any
     # kernel gets its first (tuning) call.
     _disable_flaggems_runtime_autotune()
