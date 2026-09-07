@@ -43,6 +43,9 @@ op_backends:
     - flagos
     - vendor
     - reference
+  topk_sigmoid:
+    - flagos
+    - reference
 
 # FlagOS operator blacklist
 flagos_blacklist:

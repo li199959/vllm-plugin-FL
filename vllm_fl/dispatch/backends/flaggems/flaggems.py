@@ -211,6 +211,26 @@ class FlagGemsBackend(Backend):
 
         moe_sum_flaggems(inp, out)
 
+    def topk_sigmoid(
+        self,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+        bias=None,
+    ):
+        from .impl.topk import topk_sigmoid_flaggems
+
+        return topk_sigmoid_flaggems(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            bias,
+        )
+
     def topk_softmax(
         self,
         topk_weights,

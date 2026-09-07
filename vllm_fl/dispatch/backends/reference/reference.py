@@ -167,6 +167,28 @@ class ReferenceBackend(Backend):
             return AttentionBackendEnum.FLASHMLA.get_path()
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
+    def topk_sigmoid(
+        self,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+        bias=None,
+    ):
+        """Fused sigmoid routing reference: the CUDA-parity torch fallback."""
+        from vllm_fl.ops.moe_topk_ops import _topk_sigmoid
+
+        _topk_sigmoid(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            bias,
+        )
+        return topk_weights, topk_indices
+
     def invoke_fused_moe_triton_kernel(
         self,
         A,

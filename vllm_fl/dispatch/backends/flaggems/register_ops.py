@@ -133,6 +133,15 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        # topk sigmoid (MiniMax-M3 / gpt-oss style sigmoid routing)
+        OpImpl(
+            op_name="topk_sigmoid",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.topk_sigmoid, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # invoke fused moe triton kernel
         OpImpl(
             op_name="invoke_fused_moe_triton_kernel",
