@@ -24,6 +24,18 @@ _topk_softmax = CachedOp("topk_softmax")
 _topk_sigmoid = CachedOp("topk_sigmoid")
 _grouped_topk = CachedOp("grouped_topk")
 
+
+def _use_topk_dispatch() -> bool:
+    """Route sigmoid topk through the FL dispatch only when opted in.
+
+    VLLM_FL_TOPK_DISPATCH=1 enables the flagos triton kernel; see the
+    comment in FusedTopKBiasRouterFL._compute_routing for why it is not
+    the default.
+    """
+    import os
+
+    return os.environ.get("VLLM_FL_TOPK_DISPATCH", "0") == "1"
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -244,10 +256,14 @@ class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
             if self.e_score_correction_bias is not None
             else None
         )
-        if self.scoring_func == "sigmoid":
+        if self.scoring_func == "sigmoid" and _use_topk_dispatch():
             # Sigmoid routing goes through the FL dispatch (flagos triton
-            # kernel, reference torch fallback) instead of vLLM's
-            # _moe_C op, which has no native kernel on this stack.
+            # kernel). Opt-in: the dispatch kernel passes every offline test
+            # (42-combo differential vs the fallback, fp32 gating, 16-proc
+            # cold-compile, inference_mode, graph capture) but a worker
+            # hard-died on the first call in real serving (no traceback —
+            # needs vendor-side investigation). The default path uses the
+            # registered _moe_C op, which is proven through full benches.
             M = hidden_states.size(0)
             topk_weights = torch.empty(
                 M, self.top_k, dtype=torch.float32, device=hidden_states.device
