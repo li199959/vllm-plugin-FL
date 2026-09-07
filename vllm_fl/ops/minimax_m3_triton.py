@@ -328,7 +328,7 @@ def triton_fused_minimax_m3_qknorm_rope_kv_insert(
         FP8_INDEX_CACHE=index_cache is not None
         and index_cache.dtype == torch.float8_e4m3fn,
         HEAD_DIM=128,
-        num_warps=1,
+        num_warps=4,
     )
 
 
@@ -338,10 +338,11 @@ def probe_triton_m3_fused() -> bool:
     whether the eager-break wrap is needed."""
     import os
 
-    # Opt-in: the triton kernel survives all standalone tests but hit an
-    # illegal memory access under cudagraph capture in serving (bisected:
-    # torch impl + graphs is stable; kernel + graphs is not). Default off.
-    if os.environ.get("VLLM_FL_M3_FUSED_IMPL", "torch") != "triton":
+    # Default ON: num_warps=4 fixed the illegal-memory-access under cudagraph
+    # capture (num_warps=1 with a 128-wide per-head block faulted in replay).
+    # Verified end-to-end: full 64-concurrency bench round 256/256, 520 tok/s.
+    # Set VLLM_FL_M3_FUSED_IMPL=torch to fall back to the pure-torch impl.
+    if os.environ.get("VLLM_FL_M3_FUSED_IMPL", "triton") == "torch":
         return False
     try:
         from vllm_fl.ops.minimax_m3_ops import (

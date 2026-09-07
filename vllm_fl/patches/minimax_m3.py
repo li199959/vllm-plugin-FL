@@ -55,13 +55,19 @@ def _apply_fused_op_eager_break() -> None:
     """Keep the M3 fused op out of breakable-cudagraph captures when the
     pure-torch fallback is in charge.
 
-    With the triton kernel active (self-verified at worker init) the op is
-    capture-safe and joins the graphed region — no break needed.
+    With the triton kernel active (self-verified at worker init) the op
+    normally joins the graphed region; set VLLM_FL_M3_FUSED_EAGER_BREAK=1
+    to also break around the triton path (bisect/diagnostic for the
+    capture-interaction crash).
     """
+    import os
+
     from vllm_fl.ops.minimax_m3_ops import resolve_triton_mode
 
-    if resolve_triton_mode():
-        return  # triton kernel: capture-safe, no eager break
+    if resolve_triton_mode() and os.environ.get(
+        "VLLM_FL_M3_FUSED_EAGER_BREAK", "0"
+    ) != "1":
+        return  # triton kernel inside graphs (default)
 
     try:
         from vllm.compilation.breakable_cudagraph import (
