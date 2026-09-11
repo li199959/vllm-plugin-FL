@@ -5,6 +5,8 @@ from vllm_fl.dispatch import CachedOp
 
 _silu_and_mul = CachedOp("silu_and_mul")
 _gelu_and_mul = CachedOp("gelu_and_mul")
+_swigluoai_uninterleave = CachedOp("swigluoai_uninterleave")
+_swigluoai_interleaved = CachedOp("swigluoai_interleaved")
 
 
 def apply_moe_activation(
@@ -41,25 +43,40 @@ def apply_moe_activation(
         output.copy_(_gelu_and_mul(None, input))
     elif activation == MoEActivation.SWIGLUOAI:
         # gpt-oss layout: gate/up interleaved ([g0, u0, g1, u1, ...]).
-        # Pure torch: the _C kernel is absent on OOT builds.
-        gate = input[..., ::2].float().clamp(max=7.0)
-        up = input[..., 1::2].float().clamp(min=-7.0, max=7.0)
-        output.copy_(
-            (gate * torch.sigmoid(gate * 1.702) * (up + 1.0)).to(output.dtype)
-        )
+        # Single fused triton kernel via the FL dispatch; the pure-torch
+        # fallback decomposes into a mul/sigmoid/clamp micro-kernel storm.
+        limit = 7.0 if clamp_limit is None else clamp_limit
+        a = 1.702 if alpha is None else alpha
+        b = 1.0 if beta is None else beta
+        try:
+            _swigluoai_interleaved(output, input, limit, a, b)
+        except Exception:
+            gate = input[..., ::2].float().clamp(max=limit)
+            up = input[..., 1::2].float().clamp(min=-limit, max=limit)
+            output.copy_(
+                (gate * torch.sigmoid(gate * a) * (up + b)).to(output.dtype)
+            )
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
         # MiniMax-M3 layout: w13 packed as [all gates | all ups].
         # gate * sigmoid(alpha * gate) * (up + beta), both halves clamped;
-        # computed in fp32 like SiluAndMulWithClamp's native path.
+        # computed in fp32 by the fused triton kernel, falling back to the
+        # pure-torch decomposition only if dispatch has no implementation.
         assert clamp_limit is not None, (
             "SWIGLUOAI_UNINTERLEAVE requires clamp_limit"
         )
         a = 1.702 if alpha is None else alpha
         b = 1.0 if beta is None else beta
-        half = input.size(-1) // 2
-        gate = input[..., :half].float().clamp(max=clamp_limit)
-        up = input[..., half:].float().clamp(min=-clamp_limit, max=clamp_limit)
-        output.copy_((gate * torch.sigmoid(a * gate) * (up + b)).to(output.dtype))
+        try:
+            _swigluoai_uninterleave(output, input, clamp_limit, a, b)
+        except Exception:
+            half = input.size(-1) // 2
+            gate = input[..., :half].float().clamp(max=clamp_limit)
+            up = input[..., half:].float().clamp(
+                min=-clamp_limit, max=clamp_limit
+            )
+            output.copy_(
+                (gate * torch.sigmoid(a * gate) * (up + b)).to(output.dtype)
+            )
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 

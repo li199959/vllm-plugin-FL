@@ -74,6 +74,30 @@ class FlagGemsBackend(Backend):
 
         return silu_and_mul_flaggems(obj, x)
 
+    def swigluoai_uninterleave(
+        self,
+        output: torch.Tensor,
+        x: torch.Tensor,
+        clamp_limit: float,
+        alpha: float = 1.702,
+        beta: float = 1.0,
+    ):
+        from .impl.activation_swigluoai import swigluoai_uninterleave_flaggems
+
+        return swigluoai_uninterleave_flaggems(output, x, clamp_limit, alpha, beta)
+
+    def swigluoai_interleaved(
+        self,
+        output: torch.Tensor,
+        x: torch.Tensor,
+        clamp_limit: float = 7.0,
+        alpha: float = 1.702,
+        beta: float = 1.0,
+    ):
+        from .impl.activation_swigluoai import swigluoai_interleaved_flaggems
+
+        return swigluoai_interleaved_flaggems(output, x, clamp_limit, alpha, beta)
+
     def gelu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         GELU activation followed by element-wise multiplication.

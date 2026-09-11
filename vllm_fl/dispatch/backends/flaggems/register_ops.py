@@ -142,6 +142,23 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        # fused SwiGLU-OAI MoE activations (MiniMax-M3 / gpt-oss)
+        OpImpl(
+            op_name="swigluoai_uninterleave",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.swigluoai_uninterleave, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="swigluoai_interleaved",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.swigluoai_interleaved, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # invoke fused moe triton kernel
         OpImpl(
             op_name="invoke_fused_moe_triton_kernel",
