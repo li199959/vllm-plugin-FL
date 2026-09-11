@@ -263,9 +263,19 @@ class WorkerFL(WorkerBase):
                     path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
                 )
             elif blacklist:
+                # flag_gems' registrar matches exclude entries against the
+                # *function* name (item[1].__name__), not the registered op
+                # name (item[0]) — so namespaced ops like
+                # "empty.memory_format" never match. Strip the namespace and
+                # pass both spellings so either form disables the op.
+                expanded = list(blacklist)
+                for name in blacklist:
+                    if "." in name:
+                        expanded.append(name.split(".", 1)[0])
+                expanded = list(dict.fromkeys(expanded))
                 logger.info(f"[FlagGems] Disable the following ops: {blacklist}")
                 flag_gems.enable(
-                    unused=blacklist,
+                    unused=expanded,
                     record=should_record,
                     once=True,
                     path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
