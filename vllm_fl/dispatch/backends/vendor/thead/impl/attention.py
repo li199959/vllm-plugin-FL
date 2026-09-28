@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 
 import torch
@@ -106,6 +107,26 @@ def _thead_flash_attn_varlen_func(
     if cu_seqlens_k is None:
         max_seqlen_k = 1
 
+    # The PPU wheel does not expose FA3's AOT scheduler metadata API. The
+    # num_splits=0 runtime heuristic is not CUDA Graph compatible, so use a
+    # fixed launch shape when no precomputed schedule is available.
+    if scheduler_metadata is None and num_splits == 0:
+        num_splits = 1
+
+    # A fixed split count is graph-safe even without FA3 AOT metadata. On
+    # Qwen3.5 TP2, batch-64 decode with a 4k-5k KV length benefits from five
+    # splits; keep this opt-in because the best value depends on the workload.
+    decode_splits = os.getenv("VLLM_FL_FA_DECODE_SPLITS", "")
+    if (
+        decode_splits
+        and scheduler_metadata is None
+        and cu_seqlens_k is None
+        and max_seqlen_q == 1
+        and os.getenv("VLLM_BATCH_INVARIANT", "0") != "1"
+    ):
+        num_splits = int(decode_splits)
+        if num_splits not in (1, 2, 4, 5, 8, 16, 32):
+            raise ValueError("VLLM_FL_FA_DECODE_SPLITS must be 1, 2, 4, 5, 8, 16, or 32")
 
     out, softmax_lse, _, _ = torch.ops.flash_attn_3.fwd(
         q, k, v,
