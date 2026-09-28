@@ -268,6 +268,12 @@ class PlatformFL(Platform):
                     "to avoid recurrence precision loss in GDN decode."
                 )
 
+        # Apply after vLLM imports complete and before BlockPool creation.
+        from vllm_fl.patches.lifo_alloc import apply_lifo_alloc_patch
+
+        if apply_lifo_alloc_patch():
+            logger.info("FL LIFO block allocation enabled for uncached pools")
+
         if (
             cls.device_type == "musa"
             and compilation_config.cudagraph_mode.has_full_cudagraphs()
