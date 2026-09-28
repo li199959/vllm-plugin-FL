@@ -199,7 +199,16 @@ def reshape_and_cache_flash_thead(
     Padding tokens (``slot_mapping == -1``) are handled by zeroing their
     key/value before writing to a safe slot, rather than skipping them with
     a conditional — the latter would require a CPU sync (``.any()``) and
-    produce a data-dependent tensor shape.
+    produce a data-dependent tensor shape. Slot 0 is vLLM's reserved null block
+    (``BlockPool.null_block``, block_id 0), so those writes never touch a real
+    token's entry.
+
+    The PPU wheel may read the final partial 16-slot tile beyond
+    seqused_k. Clear up to 15 following slots inside each block so stale
+    NaN/Inf values from recycled blocks cannot corrupt attention output.
+    Write real K/V last to preserve tokens that overlap these tails.
+    All operations have static shapes and require no host synchronization.
+    This mitigates missing partial-tile masking in the vendor kernel.
     """
     del kv_cache_dtype, k_scale, v_scale  # unused in pure-torch path
 
@@ -207,7 +216,7 @@ def reshape_and_cache_flash_thead(
     masked_key = key * valid_mask_gpu
     masked_value = value * valid_mask_gpu
 
-    safe_slots = slot_mapping.clamp(min=0)  # -1 -> 0
+    safe_slots = slot_mapping.clamp(min=0)  # -1 -> 0 (reserved null block)
 
     # Convert flat slot indices to (block, token_within_block) coordinates.
     # key_cache shape: [num_blocks, block_size, num_kv_heads, head_size]
@@ -215,6 +224,27 @@ def reshape_and_cache_flash_thead(
     block_indices = safe_slots // block_size
     token_in_block = safe_slots % block_size
 
+    # --- tail zeroing: define the slots the kernel may over-read ---
+    _TILE = 16
+    offsets = torch.arange(1, _TILE, device=safe_slots.device)       # 1..15
+    tail_tok = token_in_block.unsqueeze(1) + offsets.unsqueeze(0)    # [N, 15]
+    # stay inside this slot's own block: another block may belong to a
+    # different sequence, and clamping keeps every index in range.
+    tail_tok = tail_tok.clamp(max=block_size - 1)
+    tail_blk = block_indices.unsqueeze(1).expand_as(tail_tok)
+    tail_blk_flat = tail_blk.reshape(-1)
+    tail_tok_flat = tail_tok.reshape(-1)
+    # Materialise an explicit zero tensor of the exact destination shape rather
+    # than assigning the scalar 0: a scalar RHS routes through FlagGems'
+    # index_put_ broadcast path, which faults on this shape
+    # (flag_gems/ops/index_put.py:342, device-side assert).
+    zeros_tail = key_cache.new_zeros(
+        (tail_blk_flat.numel(), key_cache.shape[2], key_cache.shape[3])
+    )
+    key_cache[tail_blk_flat, tail_tok_flat] = zeros_tail
+    value_cache[tail_blk_flat, tail_tok_flat] = zeros_tail
+
+    # real K/V last, so it wins over any zero written above
     key_cache[block_indices, token_in_block] = masked_key
     value_cache[block_indices, token_in_block] = masked_value
 
