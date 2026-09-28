@@ -154,6 +154,9 @@ def register_model():
 
     _register_flagcx_connector()
 
+    from vllm_fl.patches.dense_weight_layout import apply_dense_weight_layout_patch
+    apply_dense_weight_layout_patch()
+
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
     register_router()
