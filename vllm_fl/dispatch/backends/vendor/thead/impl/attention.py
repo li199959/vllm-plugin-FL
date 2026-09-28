@@ -149,8 +149,28 @@ def _thead_flash_attn_varlen_func(
 import vllm.v1.attention.backends.flash_attn as _flash_attn_mod
 from vllm import vllm_flash_attn as _vfa
 
-_flash_attn_mod.flash_attn_varlen_func = _thead_flash_attn_varlen_func
-_flash_attn_mod.get_scheduler_metadata = _vfa.get_scheduler_metadata
+# Prefer the native vLLM extension when available; otherwise use the
+# standalone PPU wheel bridge above.
+try:
+    from vllm.vllm_flash_attn import flash_attn_interface as _native_fa
+    if getattr(_native_fa, "FA3_AVAILABLE", False):
+        _NATIVE_FA_VERSION: int | None = 3
+    elif getattr(_native_fa, "FA2_AVAILABLE", False):
+        _NATIVE_FA_VERSION = 2
+    else:
+        _NATIVE_FA_VERSION = None
+except Exception:
+    _native_fa = None
+    _NATIVE_FA_VERSION = None
+
+if _NATIVE_FA_VERSION is not None:
+    # Attention read via vLLM-native FA (stable). KV-cache write still uses the
+    # pure-torch PPU path below (native reshape_and_cache is not built on PPU).
+    _flash_attn_mod.flash_attn_varlen_func = _native_fa.flash_attn_varlen_func
+    _flash_attn_mod.get_scheduler_metadata = _native_fa.get_scheduler_metadata
+else:
+    _flash_attn_mod.flash_attn_varlen_func = _thead_flash_attn_varlen_func
+    _flash_attn_mod.get_scheduler_metadata = _vfa.get_scheduler_metadata
 
 # ---------------------------------------------------------------------------
 # Step 2c — pure-PyTorch reshape_and_cache_flash for PPU
@@ -260,9 +280,12 @@ class TheadFlashAttentionImpl(FlashAttentionImpl):
             kv_sharing_target_layer_name,
             sinks,
         )
-        # Override FA version to 3 — our custom flash_attn_varlen_func
-        # handles the wheel call correctly.
-        self.vllm_flash_attn_version = 3
+        # FA version: use the vLLM-native FA version when its extension is built
+        # (2 for _vllm_fa2_C, 3 for _vllm_fa3_C); otherwise fall back to 3 for
+        # the flash_attn_3 wheel bridge.
+        self.vllm_flash_attn_version = (
+            _NATIVE_FA_VERSION if _NATIVE_FA_VERSION is not None else 3
+        )
 
 
 class TheadFlashAttentionBackend(FlashAttentionBackend):
