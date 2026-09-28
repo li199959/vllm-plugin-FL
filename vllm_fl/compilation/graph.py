@@ -26,17 +26,73 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
 
-# FL-specific: platform-agnostic weak_ref_tensors
-def weak_ref_tensors(tensor: Any) -> Any:
-    try:
-        from vllm.utils.torch_utils import weak_ref_tensors
-        return weak_ref_tensors(tensor)
-    except Exception:
+def _non_owning_tensor_view(tensor: torch.Tensor) -> torch.Tensor:
+    """Create a Tensor view that does not own the graph allocation.
+
+    Some accelerator builds register ``_C::weak_ref_tensor`` as an identity
+    fallback when the native vLLM extension is unavailable. Keeping that
+    identity alive pins every graph output and changes graph-pool allocation
+    order. PyTorch's cudagraph tree uses these same private constructors to
+    reconstruct non-owning views of graph-managed storage.
+    """
+    if tensor.numel() == 0:
         return tensor
+
+    storage = tensor.untyped_storage()
+    metadata = {
+        "nbytes": storage.nbytes(),
+        "data_ptr": storage.data_ptr(),
+        "size": tensor.shape,
+        "stride": tensor.stride(),
+        "dtype": tensor.dtype,
+        "device": tensor.device,
+        "storage_offset": tensor.storage_offset(),
+    }
+    non_owning_storage = torch._C._construct_storage_from_data_pointer(
+        metadata["data_ptr"], metadata["device"], metadata["nbytes"]
+    )
+    return torch._C._construct_CUDA_Tensor_From_Storage_And_Metadata(
+        metadata, non_owning_storage
+    )
+
+
+# FL-specific: platform-agnostic weak_ref_tensors
+def weak_ref_tensors(value: Any) -> Any:
+    if current_platform.vendor_name == "thead" and isinstance(
+        value, torch.Tensor
+    ):
+        return _non_owning_tensor_view(value)
+    if isinstance(value, list):
+        return [weak_ref_tensors(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(weak_ref_tensors(item) for item in value)
+
+    try:
+        from vllm.sequence import IntermediateTensors
+
+        if isinstance(value, IntermediateTensors):
+            return IntermediateTensors(
+                {
+                    key: weak_ref_tensors(tensor)
+                    for key, tensor in value.tensors.items()
+                }
+            )
+    except ImportError:
+        pass
+
+    try:
+        from vllm.utils.torch_utils import weak_ref_tensors as vllm_weak_ref_tensors
+
+        return vllm_weak_ref_tensors(value)
+    except (AttributeError, ImportError, RuntimeError, ValueError):
+        # Non-tensor leaves (for example None in tuple outputs) do not own graph
+        # storage and can be returned unchanged.
+        return value
 
 
 # FL-specific: platform-agnostic graph class selection
@@ -187,49 +243,67 @@ class GraphWrapper:
 
             with ExitStack() as stack:
                 if self.cudagraph_options.gc_disable:
-                    stack.enter_context(patch("gc.collect", lambda: None))
-                    # FL-specific: patch our platform's empty_cache
+                    stack.enter_context(
+                        patch("gc.collect", lambda *args, **kwargs: None)
+                    )
+                    # torch.cuda.graph.__enter__ calls torch.cuda.empty_cache
+                    # directly. Patching PlatformFL.empty_cache alone does not
+                    # suppress it and can reset a shared PIECEWISE/FULL pool
+                    # between consecutive captures on PPU.
+                    if current_platform.device_type == "cuda":
+                        stack.enter_context(
+                            patch(
+                                "torch.cuda.empty_cache",
+                                lambda *args, **kwargs: None,
+                            )
+                        )
                     stack.enter_context(
                         patch("vllm_fl.platform.PlatformFL.empty_cache",
-                              lambda: None)
+                              lambda *args, **kwargs: None)
                     )
 
-            if self.graph_pool is not None:
-                set_graph_pool_id(self.graph_pool)
-            else:
-                set_graph_pool_id(current_platform.graph_pool_handle())
+                if self.graph_pool is not None:
+                    set_graph_pool_id(self.graph_pool)
+                else:
+                    set_graph_pool_id(current_platform.graph_pool_handle())
 
-            # Sync offloader's copy stream before capture if available.
-            try:
-                from vllm.model_executor.offloader.base import get_offloader
-                get_offloader().sync_prev_onload()
-            except (ImportError, RuntimeError):
-                pass
-
-            # FL-specific: use platform-agnostic graph capture
-            with current_platform.torch_device_fn.graph(
-                graph, pool=self.graph_pool
-            ):
-                # `output` is managed by pytorch's cudagraph pool
-                output = self.runnable(*args, **kwargs)
-                # Join offloader's copy stream after forward if available
+                # Sync offloader's copy stream before capture if available.
                 try:
                     from vllm.model_executor.offloader.base import get_offloader
-                    get_offloader().join_after_forward()
+                    get_offloader().sync_prev_onload()
                 except (ImportError, RuntimeError):
                     pass
-                if self.cudagraph_options.weak_ref_output:
-                    output = weak_ref_tensors(output)
 
-            entry.output = weak_ref_tensors(output)
-            entry.graph = graph
+                # FL-specific: use platform-agnostic graph capture.
+                # `stream=` is only accepted by CUDA-family graph contexts;
+                # other vendors (NPU/MUSA/GCU/...) may not support the kwarg.
+                graph_kwargs: dict[str, Any] = {"pool": self.graph_pool}
+                if current_platform.device_type == "cuda":
+                    graph_kwargs["stream"] = current_stream()
 
-            compilation_counter.num_cudagraph_captured += 1
+                with current_platform.torch_device_fn.graph(
+                    graph, **graph_kwargs
+                ):
+                    # `output` is managed by pytorch's cudagraph pool
+                    output = self.runnable(*args, **kwargs)
+                    # Join offloader's copy stream after forward if available
+                    try:
+                        from vllm.model_executor.offloader.base import get_offloader
+                        get_offloader().join_after_forward()
+                    except (ImportError, RuntimeError):
+                        pass
+                    if self.cudagraph_options.weak_ref_output:
+                        output = weak_ref_tensors(output)
 
-            # important: we need to return the output, rather than
-            # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during graph capture
-            return output
+                entry.output = weak_ref_tensors(output)
+                entry.graph = graph
+
+                compilation_counter.num_cudagraph_captured += 1
+
+                # important: we need to return the output, rather than
+                # the weak ref of the output, so that pytorch can correctly
+                # manage the memory during graph capture
+                return output
 
         if self.is_debugging_mode:
             # check if the input addresses are the same
