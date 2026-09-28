@@ -17,6 +17,18 @@ else:
         _torch.float4_e2m1fn_x2 = _torch.uint8
 del _torch
 
+# Keep the startup compilation limits for runtime recompilation too.
+# vLLM restores the lower torch defaults after its compilation context.
+import torch._dynamo as _torch_dynamo
+
+_torch_dynamo.config.cache_size_limit = max(
+    _torch_dynamo.config.cache_size_limit, 2048
+)
+_torch_dynamo.config.accumulated_cache_size_limit = max(
+    _torch_dynamo.config.accumulated_cache_size_limit, 8192
+)
+del _torch_dynamo
+
 from vllm_fl.utils import get_op_config as _get_op_config
 
 from . import version as version  # PyTorch-style: vllm_fl.version.git_version
