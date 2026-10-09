@@ -27,11 +27,12 @@ def patch_mm_encoder_attention():
     FLASH_ATTN branch to import directly from vllm.vllm_flash_attn with a
     fallback to flash_attn.
 
-    Patch (Hygon-only) — because PlatformFL._enum == OOT, the
+    Patch (Hygon/Thead) — because PlatformFL._enum == OOT, the
        CustomOp dispatch routes to forward_oot → forward_native → SDPA,
        ignoring the FLASH_ATTN backend selection. On Hygon, SDPA has a known
-       bug with small head counts (<6 heads). This patch routes to
-       _forward_fa (Flash Attention) when is_flash_attn_backend is True.
+       bug with small head counts (<6 heads). On Thead, the FlagGems SDPA
+       path can return incorrect/non-finite values for ViT head size 72.
+       Route to the selected _forward_fa backend on these platforms.
 
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -79,34 +80,41 @@ def patch_mm_encoder_attention():
         )
         mm_mod = None
 
-    # Part 2 (Hygon-only): route forward_native → _forward_fa to avoid SDPA
-    # head-count bug, and inject flash_attn_varlen_func into fa_utils.
+    # Part 2: honor FLASH_ATTN for OOT dispatch and provide its callable.
     from vllm.platforms import current_platform
 
     vendor = getattr(current_platform, "vendor_name", "")
-    if vendor != "hygon":
+    if vendor not in ("hygon", "thead"):
         logger.info_once(
-            "Skip Hygon FA patch: vendor=%r != 'hygon'", vendor
+            "Skip OOT FA patch: vendor=%r is not supported", vendor
         )
         return
 
     if mm_mod is None:
         logger.info_once(
-            "Skip Hygon FA patch: mm_encoder_attention not available"
+            "Skip OOT FA patch: mm_encoder_attention not available"
         )
         return
 
     logger.info_once(
-        "Hygon detected: patching forward_native → _forward_fa "
-        "to avoid OOT dispatch routing to SDPA"
+        "%s detected: honoring FLASH_ATTN in OOT encoder dispatch", vendor
     )
 
-    # Inject flash_attn_varlen_func into fa_utils (skipped because PlatformFL._enum==OOT)
+    # Upstream skips this binding because PlatformFL._enum == OOT.
     import vllm.v1.attention.backends.fa_utils as fa_utils
-    from flash_attn import flash_attn_varlen_func
+
+    if vendor == "thead":
+        from vllm_fl.dispatch.backends.vendor.thead.impl.attention import (
+            _thead_flash_attn_varlen_func as flash_attn_varlen_func,
+        )
+    else:
+        from flash_attn import flash_attn_varlen_func
 
     fa_utils.flash_attn_varlen_func = flash_attn_varlen_func
-    logger.info_once("Injected flash_attn.flash_attn_varlen_func into fa_utils")
+
+    # Backend selection is called for each encoder layer. Wrap only once.
+    if getattr(mm_mod.MMEncoderAttention.forward_native, "_fl_uses_fa", False):
+        return
 
     _orig_forward_native = mm_mod.MMEncoderAttention.forward_native
 
@@ -125,4 +133,5 @@ def patch_mm_encoder_attention():
             self, query, key, value, cu_seqlens, max_seqlen, sequence_lengths
         )
 
+    _patched_forward_native._fl_uses_fa = True
     mm_mod.MMEncoderAttention.forward_native = _patched_forward_native
