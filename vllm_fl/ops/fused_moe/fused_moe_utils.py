@@ -316,8 +316,14 @@ class TritonExpertsFL(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        # Fast path (no LoRA, NVIDIA only): single fused FlagGems call.
-        if self._lora_context is None and current_platform.is_cuda():
+        # The fused FlagGems entry currently accepts only plain SiLU.
+        # M3 needs the modular path to preserve its clamped SwiGLU params.
+        if (
+            self._lora_context is None
+            and current_platform.is_cuda()
+            and activation == MoEActivation.SILU
+            and self.quant_config.gemm1_clamp_limit is None
+        ):
             import flag_gems
 
             output.copy_(flag_gems.fused_experts_impl(
