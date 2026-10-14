@@ -91,6 +91,12 @@ def _m3_qknorm_rope_kv_insert_kernel(
     pid_t = tl.program_id(0)
     pid_s = tl.program_id(1)
 
+    # The launch omits V programs when no cache is inserted, but IQ/IK
+    # remain after V in the packed qkv row.
+    if not INSERT_KV:
+        if pid_s >= nq + nkv:
+            pid_s += nkv
+
     v_begin = nq + nkv
     iq_begin = nq + 2 * nkv
     ik_slot = iq_begin + niq  # only meaningful when HAS_INDEX
@@ -270,9 +276,17 @@ def triton_fused_minimax_m3_qknorm_rope_kv_insert(
     insert_kv = kv_cache is not None
     if num_tokens == 0:
         return
+    if kv_cache_dtype != "auto" or (
+        kv_cache is not None and kv_cache.dtype not in (torch.bfloat16, torch.float16)
+    ):
+        raise NotImplementedError("M3 Triton KV insert currently requires auto fp16/bf16 cache")
+    assert qkv.is_contiguous(), "qkv must be contiguous"
+    assert positions.is_contiguous() and cos_sin_cache.is_contiguous()
     if insert_kv:
         assert kv_cache.stride(4) == 1, "kv_cache head_dim must be contiguous"
-        assert index_cache.stride(-1) == 1, "index_cache head_dim contiguous"
+        assert slot_mapping is not None and block_size > 0
+        if has_index:
+            assert index_cache is not None and index_cache.is_contiguous()
     assert rotary_dim % 2 == 0 and rotary_dim <= 128
 
     v_slots = nkv if insert_kv else 0
