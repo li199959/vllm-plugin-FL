@@ -61,6 +61,11 @@ def _disable_flaggems_runtime_autotune() -> None:
             return cfg, {}
 
         LibTuner.policy = _policy_first_config
+        # Newer Gems registers policy subclasses which override the base
+        # method. Generated index kernels instantiate these during serving;
+        # patch the registered implementations as well as the base class.
+        for tuner in LibTuner._dispatch_table.values():
+            tuner.policy = _policy_first_config
         LibTuner._fl_no_autotune = True
         logger.info(
             "FlagGems runtime autotune disabled (first-config pinned); "
