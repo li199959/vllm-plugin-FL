@@ -2,6 +2,8 @@
 """MiniMax-M3 on PPU: FlagGems/Triton coverage with <=5% throughput loss.
 
 Switches (all opt-in; unset keeps the original configuration):
+  VLLM_FL_M3_DENSE=hybrid        per-M split-K Triton / tuned Gems for decode linears
+                                 (BF16 M<=128, FP32 router M<=512)
   VLLM_FL_M3_GEMMA_NORM=flaggems Gems Gemma RMSNorm / fused add RMSNorm
   VLLM_FL_M3_FUSED_IMPL=triton   Triton Q/K norm + RoPE + KV insert
 Any switch also installs the shape-stable Gems index / moe_align kernels.
@@ -19,7 +21,8 @@ def _env(name):
 
 def enabled() -> bool:
     return (
-        _env("VLLM_FL_M3_GEMMA_NORM") == "flaggems"
+        _env("VLLM_FL_M3_DENSE") == "hybrid"
+        or _env("VLLM_FL_M3_GEMMA_NORM") == "flaggems"
         or _env("VLLM_FL_M3_FUSED_IMPL") == "triton"
     )
 
@@ -36,6 +39,11 @@ def register() -> None:
     logger = init_logger(__name__)
     # Gems index/moe_align otherwise recompile for each new prefill size.
     install_shape_stable_gems()
+    if _env("VLLM_FL_M3_DENSE") == "hybrid":
+        from .linear import register_hybrid_linear
+
+        register_hybrid_linear()
+        logger.info_once("MiniMax-M3 decode linears use split-K Triton / tuned Gems")
     if _env("VLLM_FL_M3_GEMMA_NORM") == "flaggems":
         from .norm import register_gemma_norm
 
