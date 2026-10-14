@@ -141,6 +141,12 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     # kernel gets its first (tuning) call.
     _disable_flaggems_runtime_autotune()
 
+    # Opt-in per-model/per-vendor kernels (vllm_fl/optimizations/); must run
+    # after native schemas are registered above.
+    from vllm_fl.optimizations import register_model_optimizations
+
+    register_model_optimizations()
+
     # Deferred M3 fused-op eager-break wrap: breakable_cudagraph is not
     # importable during early plugin load, so bind it once workers are up.
     _apply_minimax_m3_eager_break()
