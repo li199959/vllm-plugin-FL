@@ -2,10 +2,10 @@
 
 Per-rank TP2 shapes: qkv 2048->2560, o_proj 2048->2048, MoE router 2048->128.
 For M<=128 the generic Gems mm tile is 1.3-2.8x slower than the Gems
-linear_kernel with a per-M tile (graph-replay timing, cold weights,
-tools/ppu/qwen3_vl_moe/sweep_decode_dense.py). Larger M (prefill), other
-shapes, the LM head and the vision tower keep the original path, so aten.mm /
-aten.linear stay on Gems there and their coverage is unchanged.
+linear_kernel with a per-M tile (graph-replay timing, cold weights). Larger
+M (prefill), other shapes, the LM head and the vision tower keep the original
+path, so aten.mm / aten.linear stay on Gems there and their coverage is
+unchanged.
 """
 
 import torch

@@ -1,11 +1,11 @@
 """Tuned Gems fused-MoE tiles for Qwen3-VL-30B-A3B on PPU (TP2 shard).
 
 Gems has no embedded tile table for PPU and falls back to get_default_config.
-For E=128, hidden 2048, per-rank intermediate 384, top-8, BF16 the sweep
-(tools/ppu/qwen3_vl_moe/sweep_moe_tiles.py) gives 1.1-1.25x for M<=1024 and
-2.4x for M>=4096, where Gems' default switches to its H20-tuned GEMM fast
-path. Other shapes and M<16 / M>8192 keep Gems' own selection; the kernels
-(fused_moe_kernel, moe_align, moe_sum) and their coverage are unchanged.
+For E=128, hidden 2048, per-rank intermediate 384, top-8, BF16 a tile sweep
+gives 1.1-1.25x for M<=1024 and 2.4x for M>=4096, where Gems' default
+switches to its H20-tuned GEMM fast path. Other shapes and M<16 / M>8192
+keep Gems' own selection; the kernels (fused_moe_kernel, moe_align, moe_sum)
+and their coverage are unchanged.
 """
 import os
 import sys
@@ -70,10 +70,9 @@ def install_tuned_moe_tiles():
 
 
 # --- hybrid: DeepGEMM grouped GEMM for full prefill chunks ------------------
-# tools/ppu/qwen3_vl_moe/bench_moe_deepgemm.py, per layer vs the tuned Gems
-# tiles above: M=256 0.83x, M=1024 1.35x, M=4096 1.82x, M=8192 1.84x. DeepGEMM
-# picks a different kernel pair per M bucket (1024 / 1536-6144 / 8192), each an
-# uncovered kernel type. Full chunked-prefill steps are exactly
+# Per layer vs the tuned Gems tiles above: M=256 0.83x, M=1024 1.35x,
+# M=4096 1.82x, M=8192 1.84x. DeepGEMM picks a different kernel pair per M
+# bucket (1024 / 1536-6144 / 8192), each an uncovered kernel type. Full chunked-prefill steps are exactly
 # max_num_batched_tokens (8192) and are >90% of prefill MoE calls, so only
 # those use DeepGEMM; the few remainder chunks stay on Gems (~0.4% slower).
 # Decode stays on Gems (faster there, keeps fused_moe/moe_align/moe_sum covered).

@@ -13,7 +13,6 @@ keeps the original configuration):
   VLLM_FL_QWEN3VL_MOE=hybrid    DeepGEMM grouped GEMM for full 8192-token prefill chunks,
                                 tuned Gems otherwise (VLLM_FL_QWEN3VL_DEEPGEMM_MIN)
   VLLM_FL_QWEN3VL_DENSE=tuned   decode-size qkv/o_proj/router on Gems linear_kernel tiles
-See README.md in this directory for measurements and the launch recipe.
 """
 
 import os

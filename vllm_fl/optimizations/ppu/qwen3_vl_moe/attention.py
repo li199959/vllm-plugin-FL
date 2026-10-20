@@ -2,7 +2,7 @@
 
 unified_attention leaves num_warps/num_stages to Triton's defaults (4/3). On
 PPU, decode with 16 query / 2 KV heads per rank and 4-5k contexts is 1.6x
-faster at 2 warps / 2 stages (tools/ppu/qwen3_vl_moe/sweep_attention.py).
+faster at 2 warps / 2 stages.
 Only the launch config changes; the kernel and its tiles are vLLM's.
 """
 import torch
@@ -51,8 +51,8 @@ def install_tuned_attention(table=None):
 
 # --- hybrid: PPU FA3 for steps that contain prefill -------------------------
 # Triton's 2D (prefill/mixed) kernel is 3.4-4.2x slower than the PPU FA3 wheel
-# on 16k chunked-prefill steps (tools/ppu/qwen3_vl_moe/bench_prefill_attention.py),
-# which stalls every decoding request for ~2.5 s per step at 16k/1k. Pure
+# on 16k chunked-prefill steps, which stalls every decoding request for
+# ~2.5 s per step at 16k/1k. Pure
 # decode steps (max_seqlen_q == 1, FULL CUDA graphs) stay on Triton. Mixed
 # steps run in PIECEWISE graphs, where attention executes eagerly.
 
@@ -61,7 +61,7 @@ _hybrid_installed = False
 
 def _fa3_eligible(kw, decode=False):
     # decode=True also routes pure-decode steps (FA3 is 1.3-2.2x the tuned
-    # Triton 3D kernel at B=32-128, tools/ppu/qwen3_vl_moe/bench_decode_attention.py).
+    # Triton 3D kernel at B=32-128).
     return (
         (decode or kw.get("max_seqlen_q", 1) > 1)
         and kw.get("causal") is True
