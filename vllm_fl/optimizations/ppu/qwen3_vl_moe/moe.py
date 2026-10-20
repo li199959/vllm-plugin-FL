@@ -72,8 +72,9 @@ def install_tuned_moe_tiles():
 # --- hybrid: DeepGEMM grouped GEMM for full prefill chunks ------------------
 # Per layer vs the tuned Gems tiles above: M=256 0.83x, M=1024 1.35x,
 # M=4096 1.82x, M=8192 1.84x. DeepGEMM picks a different kernel pair per M
-# bucket (1024 / 1536-6144 / 8192), each an uncovered kernel type. Full chunked-prefill steps are exactly
-# max_num_batched_tokens (8192) and are >90% of prefill MoE calls, so only
+# bucket (1024 / 1536-6144 / 8192), each an uncovered kernel type. Full
+# chunked-prefill steps are exactly max_num_batched_tokens (8192) and are
+# >90% of prefill MoE calls, so only
 # those use DeepGEMM; the few remainder chunks stay on Gems (~0.4% slower).
 # Decode stays on Gems (faster there, keeps fused_moe/moe_align/moe_sum covered).
 DEEPGEMM_MIN_TOKENS = int(os.environ.get("VLLM_FL_QWEN3VL_DEEPGEMM_MIN", "8192"))
