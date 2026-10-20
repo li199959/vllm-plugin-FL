@@ -199,3 +199,96 @@ def install_shape_stable_gems():
         gems_index._linearized_adjacent_index_func
     )
     _installed = True
+
+
+# --- copy_ -------------------------------------------------------------------
+# Gems' pointwise_dynamic declares every stride ``tl.constexpr``. copy_ between a
+# padded persistent buffer and a fresh slice (M-RoPE positions [3, N] with row
+# stride max_tokens+1 vs N; logits rearranged per batch size) therefore compiles
+# a new kernel for almost every token count. The kernel below takes sizes and
+# strides at runtime; fully contiguous copies keep using Gems' rank-1 kernel.
+
+_copy_installed = False
+_MAX_RANK = 4
+
+
+@triton.jit(do_not_specialize=[
+    "numel", "s1", "s2", "s3",
+    "ss0", "ss1", "ss2", "ss3", "ds0", "ds1", "ds2", "ds3",
+])
+def _strided_copy_kernel(
+    src_ptr, dst_ptr, numel,
+    s1, s2, s3,
+    ss0, ss1, ss2, ss3,
+    ds0, ds1, ds2, ds3,
+    BLOCK: tl.constexpr,
+):
+    # Shapes are left-padded to rank 4; dim 0's size is implied by numel.
+    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    i3 = offs % s3
+    rest = offs // s3
+    i2 = rest % s2
+    rest = rest // s2
+    i1 = rest % s1
+    i0 = rest // s1
+    src = i0 * ss0 + i1 * ss1 + i2 * ss2 + i3 * ss3
+    dst = i0 * ds0 + i1 * ds1 + i2 * ds2 + i3 * ds3
+    x = tl.load(src_ptr + src, mask=mask)
+    tl.store(dst_ptr + dst, x.to(dst_ptr.dtype.element_ty), mask=mask)
+
+
+def _padded(values, fill):
+    return [fill] * (_MAX_RANK - len(values)) + list(values)
+
+
+def _launch_strided_copy(src, dst):
+    numel = dst.numel()
+    sizes = _padded(dst.shape, 1)
+    ss = _padded(src.stride(), 0)
+    ds = _padded(dst.stride(), 0)
+    block = 1024
+    _strided_copy_kernel[(triton.cdiv(numel, block),)](
+        src, dst, numel, sizes[1], sizes[2], sizes[3], *ss, *ds,
+        BLOCK=block, num_warps=4,
+    )
+    return dst
+
+
+class ShapeStableCopyKernel:
+    """Stands in for Gems' ``_copy_kernel`` inside ``flag_gems.ops.copy``.
+
+    ``copy_`` validates, broadcasts ``src`` to ``dst.shape`` and then calls
+    ``_copy_kernel.instantiate(ndim)(src, out0=dst)``; only that last step
+    changes. Rank 0 and rank > 4 keep the Gems overload.
+    """
+
+    def __init__(self, gems_kernel):
+        self.gems = gems_kernel
+
+    def instantiate(self, ndim):
+        return self._copy
+
+    def _copy(self, src, out0):
+        dst = out0
+        ndim = dst.ndim
+        if ndim == 0 or ndim > _MAX_RANK:
+            return self.gems.instantiate(ndim)(src, out0=dst)
+        if src.is_contiguous() and dst.is_contiguous():
+            # Rank-1 strides are always 1, so this overload never respecializes.
+            self.gems.instantiate(1)(src.view(-1), out0=dst.view(-1))
+            return dst
+        return _launch_strided_copy(src, dst)
+
+
+def install_shape_stable_copy():
+    global _copy_installed
+    if _copy_installed:
+        return
+    import sys
+
+    import flag_gems  # noqa: F401
+
+    gems_copy = sys.modules["flag_gems.ops.copy"]
+    gems_copy._copy_kernel = ShapeStableCopyKernel(gems_copy._copy_kernel)
+    _copy_installed = True

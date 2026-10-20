@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from vllm_fl.ops.custom_ops import _disable_flaggems_runtime_autotune
-from vllm_fl.optimizations.ppu.minimax_m3.shape_stable import install_shape_stable_gems
+from vllm_fl.optimizations.ppu.common.shape_stable import install_shape_stable_gems
 
 pytestmark = pytest.mark.gpu
 

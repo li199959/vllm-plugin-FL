@@ -45,7 +45,7 @@ def main():
     from vllm_fl.optimizations.ppu.minimax_m3.moe import HybridM3Experts
     from vllm_fl.optimizations.ppu.minimax_m3.norm import gemma_fused_add_rms_norm, gemma_rms_norm
     from vllm_fl.optimizations.ppu.minimax_m3.splitk import splitk_linear
-    from vllm_fl.optimizations.ppu.minimax_m3.shape_stable import install_shape_stable_gems
+    from vllm_fl.optimizations.ppu.common.shape_stable import install_shape_stable_gems
 
     _disable_flaggems_runtime_autotune()
     install_shape_stable_gems()

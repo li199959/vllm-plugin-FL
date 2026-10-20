@@ -56,7 +56,7 @@ profile 轮（带 torch profiler，冷编译缓存）吞吐为 753 tok/s，尾�
 | `splitk.py` | 插件 Triton split-K skinny GEMM（两遍确定性归约，FP32 用 3xTF32），非 FlagGems | 随 `VLLM_FL_M3_DENSE=hybrid` |
 | `norm.py` | Gemma RMSNorm / fused add RMSNorm 用 Gems kernel，fp32 的 `1+weight` 按权重缓存 | `VLLM_FL_M3_GEMMA_NORM=flaggems` |
 | `qknorm_rope.py` | 把融合 Q/K norm+RoPE+KV insert 路由到 Triton（kernel 在 `ops/minimax_m3_triton.py`） | `VLLM_FL_M3_FUSED_IMPL=triton` |
-| `shape_stable.py` | Gems `index` / `moe_align` stage1 的运行期尺寸版本，避免服务中重编译（默认 index 走原生，见下） | 任一开关开启即安装 |
+| `../common/shape_stable.py` | Gems `index` / `moe_align` stage1 的运行期尺寸版本，避免服务中重编译（默认 index 走原生，见下） | 任一开关开启即安装 |
 
 测试在 `tests/optimizations/ppu/minimax_m3/`，启动/压测/覆盖率脚本在 `tools/ppu/minimax_m3/`。新模型按 `optimizations/<vendor>/<model>/` 新建目录（提供 `VENDOR`、`enabled()`、`register()`，可选 `moe_experts()`），并加入 `optimizations/<vendor>/__init__.py` 的 `_MODELS`。
 

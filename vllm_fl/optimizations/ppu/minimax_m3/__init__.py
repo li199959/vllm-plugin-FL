@@ -39,7 +39,7 @@ def register() -> None:
         return
     from vllm.logger import init_logger
 
-    from .shape_stable import install_shape_stable_gems
+    from ..common.shape_stable import install_shape_stable_gems
 
     logger = init_logger(__name__)
     # Gems index/moe_align otherwise recompile for each new prefill size.
