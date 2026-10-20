@@ -3,7 +3,7 @@
 
 import importlib
 
-_MODELS: tuple[str, ...] = ("minimax_m3",)
+_MODELS: tuple[str, ...] = ("minimax_m3", "qwen3_vl_moe")
 
 
 def model_packages():
