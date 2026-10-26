@@ -937,7 +937,10 @@ class WorkerFL(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, (ModelRunnerOutput, NoneType)):
+            # Pooling models return their output from execute_model directly;
+            # with async scheduling that is an AsyncModelRunnerOutput (upstream
+            # gpu_worker checks the same three types).
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
 
         assert isinstance(output, IntermediateTensors)
