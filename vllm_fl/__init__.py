@@ -170,6 +170,12 @@ def register_model():
         apply_flaggems_contiguous_patches()
     except Exception as e:
         logger.error(f"FlagGems contiguous-input patch error: {str(e)}")
+    try:
+        from vllm_fl.patches.unlimited_ocr import apply_unlimited_ocr_patches
+
+        apply_unlimited_ocr_patches()
+    except Exception as e:
+        logger.error(f"Register Unlimited-OCR model error: {str(e)}")
     patch_vllm_moe_sum()
     minimax_m3_patches()
 
