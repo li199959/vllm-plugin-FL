@@ -8,9 +8,7 @@ import triton
 
 
 @torch.library.custom_op("vllm_fl::m3_gemma_rms_norm", mutates_args=())
-def gemma_rms_norm(
-    x: torch.Tensor, weight: torch.Tensor, eps: float
-) -> torch.Tensor:
+def gemma_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     from flag_gems.ops.gemma_rms_norm import gemma_rms_norm_kernel
 
     assert x.ndim == 2 and weight.ndim == 1
@@ -20,9 +18,18 @@ def gemma_rms_norm(
     inv_rms = torch.empty((rows,), dtype=torch.float32, device=x.device)
     if rows:
         gemma_rms_norm_kernel[(rows,)](
-            out, inv_rms, x, weight,
-            out.stride(0), out.stride(1), x.stride(0), x.stride(1),
-            width, eps, triton.next_power_of_2(width), num_warps=4,
+            out,
+            inv_rms,
+            x,
+            weight,
+            out.stride(0),
+            out.stride(1),
+            x.stride(0),
+            x.stride(1),
+            width,
+            eps,
+            triton.next_power_of_2(width),
+            num_warps=4,
         )
     return out
 
@@ -80,9 +87,17 @@ def gemma_fused_add_rms_norm(
     # Use the one-pass Gems kernel even for width=6144. The generic loop
     # wrapper re-reads a rounded residual before normalizing large rows.
     fused_add_rms_norm_kernel[(rows,)](
-        x, residual, shifted_weight,
-        x.stride(0), x.stride(1), residual.stride(0), residual.stride(1),
-        width, eps, triton.next_power_of_2(width), num_warps=4,
+        x,
+        residual,
+        shifted_weight,
+        x.stride(0),
+        x.stride(1),
+        residual.stride(0),
+        residual.stride(1),
+        width,
+        eps,
+        triton.next_power_of_2(width),
+        num_warps=4,
     )
 
 

@@ -32,7 +32,7 @@ NVCC_THREADS = os.environ.get("NVCC_THREADS")
 CMAKE_BUILD_TYPE = os.environ.get("CMAKE_BUILD_TYPE")
 VERBOSE = os.environ.get("VERBOSE", "0") == "1"
 
-SUPPORTED_VENDORS = ("cuda",)
+SUPPORTED_VENDORS = ("cuda", "thead")
 
 
 def _is_cuda() -> bool:
@@ -47,6 +47,14 @@ class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str) -> None:
         super().__init__(name, sources=[])
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
+
+
+class M3PPUExtension(Extension):
+    def __init__(self) -> None:
+        super().__init__(
+            "vllm_fl._m3_fused_C",
+            sources=["vllm_fl/csrc/m3_fused/m3_fused_kernel.cu"],
+        )
 
 
 class CMakeBuildExt(build_ext):
@@ -123,6 +131,19 @@ class CMakeBuildExt(build_ext):
         )
 
     def build_extensions(self) -> None:
+        if VLLM_VENDOR == "thead":
+            for ext in self.extensions:
+                dest_path = Path(self.get_ext_fullpath(ext.name)).absolute()
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.check_call(
+                    [
+                        "bash",
+                        str(ROOT_DIR / "vllm_fl/csrc/m3_fused/build.sh"),
+                        str(dest_path),
+                    ],
+                    env={**os.environ, "PYTHON": sys.executable},
+                )
+            return
         try:
             subprocess.check_output(["cmake", "--version"], stderr=subprocess.STDOUT)
         except (OSError, subprocess.CalledProcessError) as exc:
@@ -175,9 +196,12 @@ if VLLM_VENDOR:
             f"Unsupported vendor: {VLLM_VENDOR}. "
             f"Supported vendors: {', '.join(SUPPORTED_VENDORS)}"
         )
-    ext_modules.append(
-        CMakeExtension(name="vllm_fl._C", cmake_lists_dir=str(ROOT_DIR / "csrc"))
-    )
+    if VLLM_VENDOR == "thead":
+        ext_modules.append(M3PPUExtension())
+    else:
+        ext_modules.append(
+            CMakeExtension(name="vllm_fl._C", cmake_lists_dir=str(ROOT_DIR / "csrc"))
+        )
 
 
 setup(

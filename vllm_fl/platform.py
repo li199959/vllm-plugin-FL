@@ -89,17 +89,8 @@ class PlatformFL(Platform):
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
-        """Stateless version of [torch.cuda.is_available][].
-
-        thead PPUs are CUDA-compatible accelerators: flashinfer's PPU build
-        (norm kernels, top-p/top-k sampling) works on them. Returning True
-        here unlocks vLLM's flashinfer paths (e.g. the sampler's
-        TopPSamplingFromProb kernel instead of the triton _topk_topp path,
-        ~1.3ms/step at 1k decode). Callers that must exclude thead hardware
-        use is_cuda_alike + vendor checks (as this method itself does for
-        nvidia) or device capability gates.
-        """
-        return self.device_type == "cuda"
+        """Enable CUDA-only paths for NVIDIA and the CUDA-compatible T-Head PPU."""
+        return self.device_type == "cuda" and self.vendor_name in ("nvidia", "thead")
 
     def is_musa(self) -> bool:
         if hasattr(torch, 'musa') and torch.musa.is_available():

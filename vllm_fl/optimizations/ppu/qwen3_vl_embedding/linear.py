@@ -1,24 +1,25 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-"""Small-batch Qwen3-VL-Embedding-8B linears on a tuned Gems linear_kernel.
+"""Small-batch Qwen3-VL-Embedding-8B linears with explicit FlagGems tiles.
 
-LLM linears (bf16, no bias, TP1): qkv 4096->6144, o 4096->4096,
-gate_up 4096->24576, down 12288->4096. On PPU the Gems linear_kernel matches
-cuBLAS up to M=256 (0.95-1.01x; gate_up 1.13-1.17x) and is 12-26% slower from
-M=1024 (tools/ppu/qwen3_vl_embedding/sweep_linear.py). The serving config
-blacklists Gems mm/addmm/linear (cuBLAS); batches with at most
-VLLM_FL_Q3VLEMB_GEMS_SMALL_M tokens go to Gems with the swept tile.
-"""
+Supported BF16 TP1 projections: qkv 4096->6144, o 4096->4096,
+gate_up 4096->24576 and down 12288->4096. Larger batches retain the
+native path; blacklist global Gems mm/addmm/linear for that fallback."""
 
 import os
 
 import torch
 
-from ..minimax_m3.linear import _gems_linear
+from ..common.linear import gems_linear as _gems_linear
 
 _original_linear_apply = None
 
 # (N, K) of each projection.
-SHAPES = {"qkv": (6144, 4096), "o": (4096, 4096), "gate_up": (24576, 4096), "down": (4096, 12288)}
+SHAPES = {
+    "qkv": (6144, 4096),
+    "o": (4096, 4096),
+    "gate_up": (24576, 4096),
+    "down": (4096, 12288),
+}
 _BIG = 1 << 62
 # M upper bound -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages): fastest tile from
 # the sweep (bf16, no bias, M 64 / 256).
@@ -42,14 +43,21 @@ def tile_for(name, m):
 
 def projection(x, weight):
     """Projection name if this linear may go to Gems, else None."""
-    if not (_small_m > 0 and x.ndim == 2 and x.dtype == weight.dtype == torch.bfloat16
-            and x.stride(-1) == 1 and weight.is_contiguous()):
+    if not (
+        _small_m > 0
+        and x.ndim == 2
+        and x.dtype == weight.dtype == torch.bfloat16
+        and x.stride(-1) == 1
+        and weight.is_contiguous()
+    ):
         return None
     return _BY_SHAPE.get(tuple(weight.shape))
 
 
 @torch.library.custom_op("vllm_fl::q3vlemb_gems_linear", mutates_args=())
-def gems_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+def gems_linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
     m = x.shape[0]
     if m == 0:
         return x.new_empty((0, weight.shape[0]))

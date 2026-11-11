@@ -15,16 +15,17 @@ _MODEL_TYPE = "unlimited_ocr"
 
 
 def apply_unlimited_ocr_patches() -> bool:
-    from vllm.model_executor.models import config as model_config
-    from vllm.model_executor.models import registry as model_registry
+    from vllm.model_executor.models import (
+        config as model_config,
+        registry as model_registry,
+    )
+    from vllm.tokenizers import registry as tokenizer_registry
     from vllm.transformers_utils import config as transformers_config
 
     from vllm_fl.models.unlimited_ocr.config import (
         UnlimitedOCRConfig,
         UnlimitedOCRForCausalLMConfig,
     )
-
-    from vllm.tokenizers import registry as tokenizer_registry
 
     transformers_config._CONFIG_REGISTRY[_MODEL_TYPE] = UnlimitedOCRConfig
     # The checkpoint declares LlamaTokenizerFast, which under Transformers v5

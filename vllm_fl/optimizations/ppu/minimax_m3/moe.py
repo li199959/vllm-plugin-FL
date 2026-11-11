@@ -13,13 +13,9 @@ _gemv_disabled = False
 
 
 def disable_deepgemm_gemv() -> None:
-    """Make DeepGEMM's nopad grouped GEMM never pick its GEMV kernels.
+    """Disable the PPU small-K GEMV path, which can return incorrect values.
 
-    For small M it auto-selects GEMV; the small-K variant (gemm2, K=192,
-    M<=47 here) returns wrong, run-to-run varying elements (abs error ~1 on
-    outputs of ~0.3, tools/ppu/minimax_m3/check_deepgemm_gemv.py). The
-    grouped GEMM it falls back to is correct at every M and within a few
-    percent of GEMV speed. ThreadPerN == -1 is DeepGEMM's own "no GEMV" value.
+    ThreadPerN == -1 is DeepGEMM's configuration for grouped GEMM without GEMV.
     """
     global _gemv_disabled
     if _gemv_disabled:
@@ -47,8 +43,7 @@ class HybridM3Experts(TritonExpertsFL):
         disable_deepgemm_gemv()
 
     def apply(self, output, hidden_states, *args, **kwargs):
-        # Decode (<=128 tokens): DeepGEMM grouped GEMM, 1.2-1.3x faster than
-        # the best Gems tiles with cold weights. Prefill: Gems.
+        # Decode uses DeepGEMM grouped GEMM; prefill uses FlagGems.
         if hidden_states.shape[0] <= 128:
             return DeepGemmExpertsFL.apply(self, output, hidden_states, *args, **kwargs)
         return super().apply(output, hidden_states, *args, **kwargs)
@@ -59,11 +54,17 @@ class HybridM3Experts(TritonExpertsFL):
         assert (E, K, N, top_k_num) == (128, 6144, 384, 4)
         assert dtype == torch.bfloat16
         assert activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
-        # Best of a 64-tile cold-weight sweep (sweep_moe_tiles.py --large):
-        # 1.07-1.4x DeepGEMM, kept on Gems for coverage.
+        # Fixed tile configurations for the supported M3 shard.
         if num_tokens <= 512:
             bm, bn, bk, stages = 32, 128, 64, 3
         else:
             bm, bn, bk, stages = 64, 128, 64, 3
-        return dict(BLOCK_SIZE_M=bm, BLOCK_SIZE_N=bn, BLOCK_SIZE_K=bk, GROUP_SIZE_M=1,
-                    SPLIT_K=1, num_warps=4, num_stages=stages)
+        return dict(
+            BLOCK_SIZE_M=bm,
+            BLOCK_SIZE_N=bn,
+            BLOCK_SIZE_K=bk,
+            GROUP_SIZE_M=1,
+            SPLIT_K=1,
+            num_warps=4,
+            num_stages=stages,
+        )

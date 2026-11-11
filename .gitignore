@@ -14,3 +14,12 @@ coverage.xml
 # Reports
 report*.json
 test-results-*
+
+# Local model profiling and benchmark artifacts
+/profiles/
+/benchmark_results/
+/*.log
+/CODE_REVIEW_*.md
+/vllm_fl/optimizations/ppu/**/REPORT_*.md
+/vllm_fl/*.so
+/vllm_fl/*.pyd

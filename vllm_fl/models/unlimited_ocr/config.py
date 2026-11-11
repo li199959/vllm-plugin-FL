@@ -40,7 +40,9 @@ class UnlimitedOCRConfig(DeepseekVLV2Config):
         language_config = kwargs.get("language_config") or {}
         # The checkpoint stores the window as language_config.sliding_window_size.
         if rswa_window is None:
-            rswa_window = language_config.get("sliding_window_size", DEFAULT_RSWA_WINDOW)
+            rswa_window = language_config.get(
+                "sliding_window_size", DEFAULT_RSWA_WINDOW
+            )
         super().__init__(
             tile_tag=tile_tag,
             global_view_pos=global_view_pos,

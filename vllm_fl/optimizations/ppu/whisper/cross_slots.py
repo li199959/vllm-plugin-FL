@@ -16,7 +16,9 @@ import torch
 _installed = False
 
 
-def _batched_cross_slot_mapping(encoder_seq_lens, block_table_tensor, kv_cache_spec, device):
+def _batched_cross_slot_mapping(
+    encoder_seq_lens, block_table_tensor, kv_cache_spec, device
+):
     active = np.nonzero(encoder_seq_lens)[0]
     if active.size == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
@@ -31,7 +33,9 @@ def _batched_cross_slot_mapping(encoder_seq_lens, block_table_tensor, kv_cache_s
     if (lens == max_len).all():
         return slots.reshape(-1)
     # Ragged lengths: keep each request's first lens[r] slots, in request order.
-    keep = torch.from_numpy(np.arange(max_len)[None, :] < lens[:, None]).to(device, non_blocking=True)
+    keep = torch.from_numpy(np.arange(max_len)[None, :] < lens[:, None]).to(
+        device, non_blocking=True
+    )
     return slots[keep]
 
 

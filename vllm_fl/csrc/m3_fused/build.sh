@@ -3,38 +3,48 @@
 # Arch mirrors deep_gemm's device probe: ppu001 -> compute_80a/sm_80a,
 # ppu1v5 -> compute_89/sm_89. A wrong arch compiles fine but the PPU runtime
 # silently drops every kernel launch (hggcErrorInvalidValue / no-op).
-set -e
+set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-OUT="${ROOT}/vllm_fl/_m3_fused_C.so"
+OUT="${1:-${ROOT}/vllm_fl/_m3_fused_C.so}"
+PYTHON="${PYTHON:-python3}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/PPU_SDK/CUDA_SDK}"
 
 NVCC="$CUDA_HOME/bin/nvcc"
 if [ ! -x "$NVCC" ]; then
   NVCC="$(command -v nvcc)"
 fi
-echo "nvcc: $NVCC ($($NVCC --version | tail -1))"
-
-INCLUDES=$(python - <<'PY'
+mapfile -t INCLUDES < <("$PYTHON" - <<'PY'
 import sysconfig
 import torch.utils.cpp_extension  # noqa: F401 (populate attribute)
 incs = [sysconfig.get_paths()['include']]
 for p in torch.utils.cpp_extension.include_paths():
     incs.append(p)
-print(' '.join(f'-I{p}' for p in incs))
+print('\n'.join(f'-I{p}' for p in incs))
 PY
 )
 
-LIBDIR=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+LIBDIR=$("$PYTHON" -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+TORCH_ABI=$("$PYTHON" -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))")
 
 # Match deep_gemm's is_ppu1v5_device() heuristic.
-ARCH=$(python - <<'PY'
+ARCH="${VLLM_FL_PPU_ARCH:-}"
+if [ -z "$ARCH" ]; then
+ARCH=$("$PYTHON" - <<'PY'
 import torch
+if not torch.cuda.is_available():
+    raise SystemExit('Set VLLM_FL_PPU_ARCH to build without a visible PPU')
 name = torch.cuda.get_device_name(0).lower()
 ppu15 = any(k in name for k in ('ppu1v5', 'ppu-1v5', 'zw80', 'ppu0015'))
 print('compute_89,sm_89' if ppu15 else 'compute_80a,sm_80a')
 PY
 )
+fi
+case "$ARCH" in
+  compute_80a,sm_80a|compute_89,sm_89) ;;
+  *) echo "Unsupported VLLM_FL_PPU_ARCH: $ARCH" >&2; exit 1 ;;
+esac
 echo "arch: $ARCH"
+mkdir -p "$(dirname "$OUT")"
 
 "$NVCC" -shared -Xcompiler -fPIC -O3 -std=c++17 \
   -ppu-simt-branch=false -ppu-patch-fence-ppu=false -wno-loop-miss-transform \
@@ -43,10 +53,10 @@ echo "arch: $ARCH"
   --expt-relaxed-constexpr --expt-extended-lambda \
   "--ptxas-options=--register-usage-level=10" \
   "--diag-suppress=39,174,177,940" \
-  "-D_GLIBCXX_USE_CXX11_ABI=1" \
+  "-D_GLIBCXX_USE_CXX11_ABI=$TORCH_ABI" \
   -DTORCH_EXTENSION_NAME=_m3_fused_C \
   -DTORCH_API_INCLUDE_EXTENSION_H \
-  $INCLUDES \
+  "${INCLUDES[@]}" \
   "${ROOT}/vllm_fl/csrc/m3_fused/m3_fused_kernel.cu" \
   -L"$LIBDIR" -ltorch -ltorch_cpu -ltorch_python -lc10 -ltorch_cuda -lc10_cuda \
   -o "$OUT"

@@ -29,6 +29,13 @@ import math
 from collections.abc import Mapping, Sequence
 
 from vllm.config import VllmConfig
+from vllm.model_executor.models.deepseek_ocr import (
+    DeepseekOCRDummyInputsBuilder,
+    DeepseekOCRForCausalLM,
+    DeepseekOCRMultiModalProcessor,
+    DeepseekOCRProcessingInfo,
+    NGramPerReqLogitsProcessor,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalKwargsItems
@@ -48,13 +55,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     IMAGE_SIZE,
     DeepseekOCRProcessor,
     count_tiles,
-)
-from vllm.model_executor.models.deepseek_ocr import (
-    DeepseekOCRDummyInputsBuilder,
-    DeepseekOCRForCausalLM,
-    DeepseekOCRMultiModalProcessor,
-    DeepseekOCRProcessingInfo,
-    NGramPerReqLogitsProcessor,
 )
 
 from . import rswa
@@ -83,7 +83,10 @@ def _dynamic_preprocess_max_crops(image, *args, **kwargs):
     return _dynamic_preprocess(image, *args, **kwargs)
 
 
-if getattr(_ocr_processing.dynamic_preprocess, "__name__", "") != "_dynamic_preprocess_max_crops":
+if (
+    getattr(_ocr_processing.dynamic_preprocess, "__name__", "")
+    != "_dynamic_preprocess_max_crops"
+):
     _ocr_processing.dynamic_preprocess = _dynamic_preprocess_max_crops
 
 
@@ -180,7 +183,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         assert isinstance(image_token_id, int)
 
         def get_replacement_unlimited_ocr(item_idx: int):
-            images = mm_items.get_items("image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
@@ -218,7 +223,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             mm_info = mm_info._replace(hashes=hashes)
         return prompt_ids, mm_info, is_update_applied
 
-    def _cached_apply_hf_processor(self, inputs: ProcessorInputs, timing_ctx: TimingContext):
+    def _cached_apply_hf_processor(
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
+    ):
         # Per-item output depends on how many images are in the request, which
         # the processing cache does not account for: cache single-image only.
         if inputs.mm_data_items.get_count("image", strict=False) > 1:

@@ -79,6 +79,8 @@ def _compute_kv_seq_mask_rswa(
         in_window = (query_abs_pos - seq_offset) < R_SWA_WINDOW
         seq_mask = seq_mask & (in_prefix | in_window)
     return seq_mask
+
+
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 

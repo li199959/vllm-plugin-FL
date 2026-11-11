@@ -17,7 +17,11 @@ _registered = False
 
 
 def _stable():
-    return os.environ.get("VLLM_FL_UOCR_STABLE", "").strip().lower() in ("1", "true", "on")
+    return os.environ.get("VLLM_FL_UOCR_STABLE", "").strip().lower() in (
+        "1",
+        "true",
+        "on",
+    )
 
 
 def enabled() -> bool:
@@ -29,7 +33,10 @@ def register() -> None:
     if _registered:
         return
     if _stable():
-        from ..common.shape_stable import install_shape_stable_copy, install_shape_stable_gems
+        from ..common.shape_stable import (
+            install_shape_stable_copy,
+            install_shape_stable_gems,
+        )
 
         install_shape_stable_gems()
         install_shape_stable_copy()

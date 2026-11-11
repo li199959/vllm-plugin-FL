@@ -38,11 +38,14 @@ def _register_encoder_sdpa():
         return _encoder_sdpa_op
 
     @torch.library.custom_op("fl_whisper::encoder_sdpa", mutates_args=())
-    def encoder_sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                     num_heads: int, scale: float) -> torch.Tensor:
+    def encoder_sdpa(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, scale: float
+    ) -> torch.Tensor:
         b, s, _ = q.shape
         q, k, v = (t.view(b, s, num_heads, -1).transpose(1, 2) for t in (q, k, v))
-        out = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, scale=scale)
+        out = nn.functional.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale
+        )
         return out.transpose(1, 2).reshape(b, s, -1)
 
     @encoder_sdpa.register_fake
@@ -86,6 +89,7 @@ def _compiled_stack(encoder):
 # (one per batch size, shared memory pool); larger batches are GPU bound and run the
 # compiled stack directly. Outputs are cloned: vLLM caches encoder outputs across
 # steps, and the next replay overwrites the static buffer.
+
 
 class _EncoderGraphs:
     def __init__(self, fn, max_batch):
@@ -140,7 +144,9 @@ def _encoder_forward(encoder, input_features):
         embeds = nn.functional.gelu(encoder.conv1(features))
         embeds = nn.functional.gelu(encoder.conv2(embeds))
         embeds = embeds.transpose(-1, -2)
-        embeds = (embeds + encoder.embed_positions.weight[: embeds.size(-2), :]).to(embeds.dtype)
+        embeds = (embeds + encoder.embed_positions.weight[: embeds.size(-2), :]).to(
+            embeds.dtype
+        )
         hidden_states.append(embeds)
         input_is_batched = embeds.ndim > 2
     if input_is_batched:
@@ -161,6 +167,7 @@ def _get_encoder_outputs(self, input_features):
 # is traced with encoder_hidden_states=None (cross K/V read from the cache). Writing
 # the new requests' cross K/V into the cache here, exactly as CrossAttentionImpl
 # does (builder's cross slot_mapping), lets those steps reuse the same graph.
+
 
 def _write_cross_kv(decoder, enc_states):
     from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -194,7 +201,9 @@ def _model_forward(self, input_ids, positions, encoder_outputs):
     skip = ctx.skip_compiled
     ctx.skip_compiled = False
     try:
-        return self.decoder(input_ids=input_ids, positions=positions, encoder_hidden_states=None)
+        return self.decoder(
+            input_ids=input_ids, positions=positions, encoder_hidden_states=None
+        )
     finally:
         ctx.skip_compiled = skip
 
@@ -211,4 +220,6 @@ def install(encoder: bool, prefill: bool) -> None:
         WhisperModel._fl_orig_forward = WhisperModel.forward
         WhisperModel.forward = _model_forward
     _installed = True
-    logger.info("Whisper optimizations: compile_encoder=%s compile_prefill=%s", encoder, prefill)
+    logger.info(
+        "Whisper optimizations: compile_encoder=%s compile_prefill=%s", encoder, prefill
+    )

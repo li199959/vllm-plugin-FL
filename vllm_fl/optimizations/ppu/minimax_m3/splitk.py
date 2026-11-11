@@ -16,8 +16,18 @@ import triton.language as tl
 
 @triton.jit
 def _m3_splitk_gemm_kernel(
-    x_ptr, w_ptr, part_ptr, M, N, K, stride_xm, stride_wn, k_per_split,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    x_ptr,
+    w_ptr,
+    part_ptr,
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_wn,
+    k_per_split,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     IS_FP32: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
@@ -31,10 +41,16 @@ def _m3_splitk_gemm_kernel(
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k0 in range(k_begin, k_end, BLOCK_K):
         k = k0 + offs_k
-        a = tl.load(x_ptr + offs_m[:, None] * stride_xm + k[None, :],
-                    mask=(offs_m[:, None] < M) & (k[None, :] < k_end), other=0.0)
-        b = tl.load(w_ptr + offs_n[None, :] * stride_wn + k[:, None],
-                    mask=(offs_n[None, :] < N) & (k[:, None] < k_end), other=0.0)
+        a = tl.load(
+            x_ptr + offs_m[:, None] * stride_xm + k[None, :],
+            mask=(offs_m[:, None] < M) & (k[None, :] < k_end),
+            other=0.0,
+        )
+        b = tl.load(
+            w_ptr + offs_n[None, :] * stride_wn + k[:, None],
+            mask=(offs_n[None, :] < N) & (k[:, None] < k_end),
+            other=0.0,
+        )
         if IS_FP32:
             # 3xTF32 keeps fp32-level error (~1e-6 at K=6144, below the
             # native GEMM) and is 2-4x faster than "ieee" on PPU.
@@ -47,7 +63,13 @@ def _m3_splitk_gemm_kernel(
 
 @triton.jit
 def _m3_splitk_reduce_kernel(
-    part_ptr, bias_ptr, out_ptr, M, N, SPLIT: tl.constexpr, HAS_BIAS: tl.constexpr,
+    part_ptr,
+    bias_ptr,
+    out_ptr,
+    M,
+    N,
+    SPLIT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -62,10 +84,10 @@ def _m3_splitk_reduce_kernel(
 
 def splitk_config(m, n, k, dtype):
     """(BLOCK_M, BLOCK_N, BLOCK_K, SPLIT, num_warps) from cold-weight sweeps
-    at K=6144 (fp32 N=128; bf16 N=384/1024), tools/ppu/minimax_m3/sweep_splitk.py."""
+    at K=6144 (fp32 N=128; bf16 N=384/1024)."""
     fp32 = dtype == torch.float32
     if not fp32 and n > 512:
-        # qkv [M,6144]x[1024,6144]: tools/ppu/minimax_m3/sweep_mainstream.py --op qkv
+        # QKV projection: [M, 6144] x [1024, 6144].
         if m <= 16:
             return 16, 64, 64, 8, 4, 3
         if m <= 32:
@@ -97,19 +119,41 @@ def splitk_linear_impl(x, weight, bias=None, config=None):
     split = triton.cdiv(k, k_per_split)
     part = torch.empty((split, m, n), device=x.device, dtype=torch.float32)
     _m3_splitk_gemm_kernel[(triton.cdiv(m, block_m), triton.cdiv(n, block_n), split)](
-        x, weight, part, m, n, k, x.stride(0), weight.stride(0), k_per_split,
-        block_m, block_n, block_k, x.dtype == torch.float32, num_warps=warps, num_stages=stages,
+        x,
+        weight,
+        part,
+        m,
+        n,
+        k,
+        x.stride(0),
+        weight.stride(0),
+        k_per_split,
+        block_m,
+        block_n,
+        block_k,
+        x.dtype == torch.float32,
+        num_warps=warps,
+        num_stages=stages,
     )
     reduce_block = 1024
     _m3_splitk_reduce_kernel[(triton.cdiv(m * n, reduce_block),)](
-        part, out if bias is None else bias, out, m, n, split, bias is not None, reduce_block,
+        part,
+        out if bias is None else bias,
+        out,
+        m,
+        n,
+        split,
+        bias is not None,
+        reduce_block,
         num_warps=4,
     )
     return out
 
 
 @torch.library.custom_op("vllm_fl::m3_splitk_linear", mutates_args=())
-def splitk_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+def splitk_linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
     return splitk_linear_impl(x, weight, bias)
 
 

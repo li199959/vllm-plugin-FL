@@ -48,7 +48,11 @@ def _contiguous_input(fn, input, *args, **kwargs):
 def _empty_sum(fn, inp, *args, dtype=None, **kwargs):
     if inp.numel() == 0:
         if dtype is None:
-            dtype = torch.int64 if inp.dtype == torch.bool else inp.dtype
+            dtype = (
+                inp.dtype
+                if inp.is_floating_point() or inp.is_complex()
+                else torch.int64
+            )
         return torch.zeros((), dtype=dtype, device=inp.device)
     return fn(inp, *args, dtype=dtype, **kwargs)
 

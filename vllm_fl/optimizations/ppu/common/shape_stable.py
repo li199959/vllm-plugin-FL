@@ -7,6 +7,7 @@ Chunked prefill produces a new token count almost every step, so each one
 triggered a Triton compile and stalled all TP ranks for seconds. These
 variants pass those sizes at runtime; kernel bodies and configs are unchanged.
 """
+
 import importlib.util
 import os
 
@@ -16,10 +17,16 @@ import triton.language as tl
 _installed = False
 
 
-@triton.jit(do_not_specialize=[
-    "numel", "tokens_per_thread", "numel_sorted_token_ids", "numel_expert_ids",
-    "block_size_sorted", "block_size_expert",
-])
+@triton.jit(
+    do_not_specialize=[
+        "numel",
+        "tokens_per_thread",
+        "numel_sorted_token_ids",
+        "numel_expert_ids",
+        "block_size_sorted",
+        "block_size_expert",
+    ]
+)
 def _moe_align_stage1_kernel(
     topk_ids_ptr,
     tokens_cnts_ptr,
@@ -43,7 +50,9 @@ def _moe_align_stage1_kernel(
     for base in range(0, block_size_sorted, TILE):
         local = base + lanes
         offsets_sorted = pid * block_size_sorted + local
-        mask_sorted = (local < block_size_sorted) & (offsets_sorted < numel_sorted_token_ids)
+        mask_sorted = (local < block_size_sorted) & (
+            offsets_sorted < numel_sorted_token_ids
+        )
         tl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
 
     for base in range(0, block_size_expert, TILE):
@@ -70,6 +79,7 @@ class _Stage1Launcher:
     def __getitem__(self, grid):
         def launch(*args):
             return _moe_align_stage1_kernel[grid](*args, TILE=256)
+
         return launch
 
 
@@ -100,45 +110,57 @@ def _generate_single_index(prefix_size, suffix_size, configs, code):
     code.writeline("@triton.jit")
     code.writeline("def _index_linearized_jit_function(")
     with code.indent():
-        code.writelines([
-            "input_ptr,", "indices0_ptr,", "out_ptr,", "M,", "N,", "D0,",
-            "BLOCK_SIZE0: tl.constexpr,", "BLOCK_SIZE1: tl.constexpr,",
-        ])
+        code.writelines(
+            [
+                "input_ptr,",
+                "indices0_ptr,",
+                "out_ptr,",
+                "M,",
+                "N,",
+                "D0,",
+                "BLOCK_SIZE0: tl.constexpr,",
+                "BLOCK_SIZE1: tl.constexpr,",
+            ]
+        )
     code.writeline("):")
     with code.indent():
-        code.writelines([
-            "pid_p = tl.program_id(axis=0)",
-            "pid_m = tl.program_id(axis=1)",
-            "pid_n = tl.program_id(axis=2)",
-            "index_offsets = pid_m * BLOCK_SIZE0 + tl.arange(0, BLOCK_SIZE0)",
-            "suffix_offsets = pid_n * BLOCK_SIZE1 + tl.arange(0, BLOCK_SIZE1)",
-            "index_mask = index_offsets < M",
-            "raw0 = tl.load(indices0_ptr + index_offsets, mask=index_mask, other=0)",
-            "idx0 = tl.where(raw0 < 0, raw0 + D0, raw0)",
-            "valid_index = (idx0 >= 0) & (idx0 < D0)",
-            f"src_offsets = (pid_p * D0 + idx0[:, None]) * {suffix_size} + suffix_offsets[None, :]",
-            f"out_offsets = (pid_p * M + index_offsets[:, None]) * {suffix_size} + suffix_offsets[None, :]",
-            "mask = index_mask[:, None] & valid_index[:, None] & "
-            f"(suffix_offsets[None, :] < {suffix_size})",
-            "cur_value = tl.load(input_ptr + src_offsets, mask=mask)",
-            "tl.store(out_ptr + out_offsets, cur_value, mask=mask)",
-        ])
+        code.writelines(
+            [
+                "pid_p = tl.program_id(axis=0)",
+                "pid_m = tl.program_id(axis=1)",
+                "pid_n = tl.program_id(axis=2)",
+                "index_offsets = pid_m * BLOCK_SIZE0 + tl.arange(0, BLOCK_SIZE0)",
+                "suffix_offsets = pid_n * BLOCK_SIZE1 + tl.arange(0, BLOCK_SIZE1)",
+                "index_mask = index_offsets < M",
+                "raw0 = tl.load(indices0_ptr + index_offsets, mask=index_mask, other=0)",
+                "idx0 = tl.where(raw0 < 0, raw0 + D0, raw0)",
+                "valid_index = (idx0 >= 0) & (idx0 < D0)",
+                f"src_offsets = (pid_p * D0 + idx0[:, None]) * {suffix_size} + suffix_offsets[None, :]",
+                f"out_offsets = (pid_p * M + index_offsets[:, None]) * {suffix_size} + suffix_offsets[None, :]",
+                "mask = index_mask[:, None] & valid_index[:, None] & "
+                f"(suffix_offsets[None, :] < {suffix_size})",
+                "cur_value = tl.load(input_ptr + src_offsets, mask=mask)",
+                "tl.store(out_ptr + out_offsets, cur_value, mask=mask)",
+            ]
+        )
     code.newline()
     code.writeline("def _index_linearized_wrapper(input, start_dim, indices, out):")
     with code.indent():
-        code.writelines([
-            "M = indices[0].numel()",
-            f"N = {suffix_size}",
-            "grid = lambda meta: (",
-            f"    {prefix_size},",
-            "    triton.cdiv(M, meta['BLOCK_SIZE0']),",
-            "    triton.cdiv(N, meta['BLOCK_SIZE1']),",
-            ")",
-            "_index_linearized_jit_function[grid](",
-            "    input, indices[0], out, M, N, input.shape[start_dim],",
-            ")",
-            "return input",
-        ])
+        code.writelines(
+            [
+                "M = indices[0].numel()",
+                f"N = {suffix_size}",
+                "grid = lambda meta: (",
+                f"    {prefix_size},",
+                "    triton.cdiv(M, meta['BLOCK_SIZE0']),",
+                "    triton.cdiv(N, meta['BLOCK_SIZE1']),",
+                ")",
+                "_index_linearized_jit_function[grid](",
+                "    input, indices[0], out, M, N, input.shape[start_dim],",
+                ")",
+                "return input",
+            ]
+        )
     return code
 
 
@@ -163,17 +185,22 @@ class ShapeStableIndexFunction:
 
         start_dim = int(start_dim)
         prefix_size = _volume(inp.shape[:start_dim])
-        suffix_size = _volume(inp.shape[start_dim + 1:])
+        suffix_size = _volume(inp.shape[start_dim + 1 :])
         configs = _index_candidate_configs(inp, start_dim, 1, tensor_indices)
         config_key = tuple(
-            (tuple(sorted(c.kwargs.items())), c.num_warps, c.num_stages) for c in configs
+            (tuple(sorted(c.kwargs.items())), c.num_warps, c.num_stages)
+            for c in configs
         )
         key = (prefix_size, suffix_size, inp.dtype, config_key)
         overload = self.overloads.get(key)
         if overload is None:
-            code = _generate_single_index(prefix_size, suffix_size, configs, IndentedBuffer())
-            name = (f"index_linearized_fl_p{prefix_size}_n{suffix_size}_"
-                    f"{str(inp.dtype).replace('.', '_')}_{abs(hash(config_key)):x}_{os.getpid()}")
+            code = _generate_single_index(
+                prefix_size, suffix_size, configs, IndentedBuffer()
+            )
+            name = (
+                f"index_linearized_fl_p{prefix_size}_n{suffix_size}_"
+                f"{str(inp.dtype).replace('.', '_')}_{abs(hash(config_key)):x}_{os.getpid()}"
+            )
             path = code_cache_dir() / f"{name}.py"
             write_atomic(path, code.getvalue())
             spec = importlib.util.spec_from_file_location(f"_gen_module_{name}", path)
@@ -212,15 +239,37 @@ _copy_installed = False
 _MAX_RANK = 4
 
 
-@triton.jit(do_not_specialize=[
-    "numel", "s1", "s2", "s3",
-    "ss0", "ss1", "ss2", "ss3", "ds0", "ds1", "ds2", "ds3",
-])
+@triton.jit(
+    do_not_specialize=[
+        "numel",
+        "s1",
+        "s2",
+        "s3",
+        "ss0",
+        "ss1",
+        "ss2",
+        "ss3",
+        "ds0",
+        "ds1",
+        "ds2",
+        "ds3",
+    ]
+)
 def _strided_copy_kernel(
-    src_ptr, dst_ptr, numel,
-    s1, s2, s3,
-    ss0, ss1, ss2, ss3,
-    ds0, ds1, ds2, ds3,
+    src_ptr,
+    dst_ptr,
+    numel,
+    s1,
+    s2,
+    s3,
+    ss0,
+    ss1,
+    ss2,
+    ss3,
+    ds0,
+    ds1,
+    ds2,
+    ds3,
     BLOCK: tl.constexpr,
 ):
     # Shapes are left-padded to rank 4; dim 0's size is implied by numel.
@@ -249,8 +298,16 @@ def _launch_strided_copy(src, dst):
     ds = _padded(dst.stride(), 0)
     block = 1024
     _strided_copy_kernel[(triton.cdiv(numel, block),)](
-        src, dst, numel, sizes[1], sizes[2], sizes[3], *ss, *ds,
-        BLOCK=block, num_warps=4,
+        src,
+        dst,
+        numel,
+        sizes[1],
+        sizes[2],
+        sizes[3],
+        *ss,
+        *ds,
+        BLOCK=block,
+        num_warps=4,
     )
     return dst
 

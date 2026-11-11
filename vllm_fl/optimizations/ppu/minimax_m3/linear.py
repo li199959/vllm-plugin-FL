@@ -10,8 +10,8 @@ Routing follows cold-weight (L2-missing) sweeps on PPU-ZW810E, see README:
 """
 
 import torch
-import triton
 
+from ..common.linear import gems_linear as _gems_linear
 from .splitk import splitk_linear, splitk_linear_impl
 
 _original_linear_apply = None
@@ -19,12 +19,30 @@ _original_linear_apply = None
 _M_BUCKETS = (1, 8, 16, 32, 64, 128)
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) per M bucket.
 _GEMS_TILES = {
-    "small_k": {1: (16, 64, 64, 4, 4), 8: (16, 64, 64, 4, 4), 16: (16, 64, 64, 4, 4),
-                32: (32, 128, 64, 4, 4), 64: (64, 64, 64, 4, 3), 128: (64, 128, 64, 4, 2)},
-    "vocab": {1: (16, 64, 128, 4, 2), 8: (16, 64, 128, 4, 2), 16: (16, 64, 128, 4, 2),
-              32: (32, 64, 128, 4, 3), 64: (64, 64, 128, 4, 3), 128: (64, 64, 128, 4, 3)},
-    "large_k": {1: (16, 32, 256, 4, 4), 8: (16, 32, 256, 4, 4), 16: (16, 32, 256, 4, 4),
-                32: (16, 64, 256, 4, 4), 64: (32, 32, 128, 4, 4), 128: (64, 64, 128, 4, 4)},
+    "small_k": {
+        1: (16, 64, 64, 4, 4),
+        8: (16, 64, 64, 4, 4),
+        16: (16, 64, 64, 4, 4),
+        32: (32, 128, 64, 4, 4),
+        64: (64, 64, 64, 4, 3),
+        128: (64, 128, 64, 4, 2),
+    },
+    "vocab": {
+        1: (16, 64, 128, 4, 2),
+        8: (16, 64, 128, 4, 2),
+        16: (16, 64, 128, 4, 2),
+        32: (32, 64, 128, 4, 3),
+        64: (64, 64, 128, 4, 3),
+        128: (64, 64, 128, 4, 3),
+    },
+    "large_k": {
+        1: (16, 32, 256, 4, 4),
+        8: (16, 32, 256, 4, 4),
+        16: (16, 32, 256, 4, 4),
+        32: (16, 64, 256, 4, 4),
+        64: (32, 32, 128, 4, 4),
+        128: (64, 64, 128, 4, 4),
+    },
 }
 
 
@@ -36,27 +54,10 @@ def _use_splitk_bf16(m, n, k):
     return k >= 4096 and n <= 1024 and (m <= 64 or n <= 512)
 
 
-def _gems_linear(x, weight, bias, tile):
-    from flag_gems.ops.linear import linear_kernel
-
-    m, k = x.shape
-    n = weight.shape[0]
-    bm, bn, bk, warps, stages = tile
-    kernel = linear_kernel
-    while not isinstance(kernel, triton.runtime.JITFunction):
-        kernel = kernel.fn
-    out = torch.empty((m, n), device=x.device, dtype=x.dtype)
-    kernel[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
-        x, weight, weight if bias is None else bias, out,
-        m, n, k, x.stride(0), x.stride(1), weight.stride(0), weight.stride(1),
-        n, 1, 0 if bias is None else bias.stride(0), bias is not None,
-        bm, bn, bk, num_warps=warps, num_stages=stages,
-    )
-    return out
-
-
 @torch.library.custom_op("vllm_fl::m3_bf16_linear", mutates_args=())
-def bf16_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+def bf16_linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
     m, k = x.shape
     n = weight.shape[0]
     if m > 128:
@@ -84,8 +85,11 @@ def _hybrid_linear_apply(self, layer, x, bias=None):
         # (<=512). Split-K is 0.6-0.9x native at M=8-64; the rare mixed
         # steps at 72-512 cost more, but routing them too keeps the native
         # fp32 GEMM/GEMV kernels out of decode entirely.
-        if (x.dtype == weight.dtype == torch.float32 and x.shape[0] <= 512
-                and x.shape[1] >= 1024):
+        if (
+            x.dtype == weight.dtype == torch.float32
+            and x.shape[0] <= 512
+            and x.shape[1] >= 1024
+        ):
             return splitk_linear(x, weight, bias)
     return _original_linear_apply(self, layer, x, bias)
 
@@ -93,6 +97,7 @@ def _hybrid_linear_apply(self, layer, x, bias=None):
 def register_hybrid_linear():
     global _original_linear_apply
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
     if _original_linear_apply is None:
         _original_linear_apply = UnquantizedLinearMethod.apply
         UnquantizedLinearMethod.apply = _hybrid_linear_apply

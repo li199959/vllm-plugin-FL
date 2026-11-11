@@ -81,6 +81,9 @@ def resolve_triton_mode(probe: bool = True) -> bool:
         return _TRITON_MODE
     if not probe:
         return False
+    # The probe calls this module's torch fallback as its reference. Keep
+    # that call from recursively invoking the probe before a mode is chosen.
+    _TRITON_MODE = False
     try:
         from vllm_fl.ops.minimax_m3_triton import probe_triton_m3_fused
 
@@ -279,11 +282,11 @@ def register_minimax_m3_ops() -> None:
 
     try:
         import vllm._C  # noqa: F401
-
-        register_minimax_m3_ops._done = True
-        return  # native build already provides the kernel
     except (ImportError, OSError):
         pass
+    if hasattr(torch.ops._C, "fused_minimax_m3_qknorm_rope_kv_insert"):
+        register_minimax_m3_ops._done = True
+        return
 
     # The standalone native extension (vllm_fl._m3_fused_C) registers the
     # same op at import; the pure-torch fallback steps aside for it.

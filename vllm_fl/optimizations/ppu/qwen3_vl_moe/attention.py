@@ -1,10 +1,8 @@
-"""Launch params for vLLM's Triton unified attention on PPU (Qwen3-VL, TP2).
+"""Triton attention launch parameters and optional PPU FA3 dispatch.
 
-unified_attention leaves num_warps/num_stages to Triton's defaults (4/3). On
-PPU, decode with 16 query / 2 KV heads per rank and 4-5k contexts is 1.6x
-faster at 2 warps / 2 stages.
-Only the launch config changes; the kernel and its tiles are vLLM's.
-"""
+The decode launch table targets Qwen3-VL TP2. Hybrid mode keeps pure
+decode on Triton and routes eligible prefill/mixed steps to FA3."""
+
 import torch
 
 _installed = False
@@ -45,7 +43,9 @@ def install_tuned_attention(table=None):
         return
     import vllm.v1.attention.ops.triton_unified_attention as ua
 
-    ua.kernel_unified_attention = _TunedLaunch(ua.kernel_unified_attention, table or LAUNCH)
+    ua.kernel_unified_attention = _TunedLaunch(
+        ua.kernel_unified_attention, table or LAUNCH
+    )
     _installed = True
 
 
@@ -80,16 +80,59 @@ def _fa3_eligible(kw, decode=False):
     )
 
 
-def fa3_paged_attention(q, k, v, out, cu_seqlens_q, max_seqlen_q, seqused_k,
-                        block_table, softmax_scale, num_splits=0):
+def fa3_paged_attention(
+    q,
+    k,
+    v,
+    out,
+    cu_seqlens_q,
+    max_seqlen_q,
+    seqused_k,
+    block_table,
+    softmax_scale,
+    num_splits=0,
+):
     """Same call as vllm_fl's thead FA3 backend (PPU wants max_seqlen_k=1 when paged).
 
     num_splits=0 lets FA3 split KV (adds FlashAttnFwdCombine kernels); 1 disables it.
     """
     torch.ops.flash_attn_3.fwd(
-        q, k, v, None, None, None, out, cu_seqlens_q, None, None, None, seqused_k,
-        max_seqlen_q, 1, block_table, None, None, None, None, None, None, None, None,
-        softmax_scale, True, -1, -1, 0, 0.0, True, None, num_splits, None, 0, None)
+        q,
+        k,
+        v,
+        None,
+        None,
+        None,
+        out,
+        cu_seqlens_q,
+        None,
+        None,
+        None,
+        seqused_k,
+        max_seqlen_q,
+        1,
+        block_table,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        softmax_scale,
+        True,
+        -1,
+        -1,
+        0,
+        0.0,
+        True,
+        None,
+        num_splits,
+        None,
+        0,
+        None,
+    )
     return out
 
 
@@ -101,9 +144,17 @@ def _hybrid(triton_fn, decode=False):
             # pure decode keeps FA3's own split choice (fixed splits are 9-15% slower).
             splits = 1 if kw["max_seqlen_q"] > 1 else 0
             return fa3_paged_attention(
-                kw["q"], kw["k"], kw["v"], kw["out"], kw["cu_seqlens_q"],
-                kw["max_seqlen_q"], kw["seqused_k"], kw["block_table"], kw["softmax_scale"],
-                num_splits=splits)
+                kw["q"],
+                kw["k"],
+                kw["v"],
+                kw["out"],
+                kw["cu_seqlens_q"],
+                kw["max_seqlen_q"],
+                kw["seqused_k"],
+                kw["block_table"],
+                kw["softmax_scale"],
+                num_splits=splits,
+            )
         return triton_fn(**kw)
 
     unified_attention.triton = triton_fn
@@ -116,6 +167,7 @@ def install_hybrid_attention(decode=False):
     if _hybrid_installed:
         return
     import flash_attn_3._C  # noqa: F401  (registers torch.ops.flash_attn_3)
+
     import vllm.v1.attention.backends.triton_attn as backend
 
     backend.unified_attention = _hybrid(backend.unified_attention, decode)

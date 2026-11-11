@@ -1,17 +1,12 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-"""MiniMax-M3 on PPU: FlagGems/Triton coverage with <=5% throughput loss.
+"""MiniMax-M3 opt-in kernels for T-Head PPU.
 
-Switches (all opt-in; unset keeps the original configuration):
-  VLLM_FL_MOE=hybrid             decode (<=128 tokens) on DeepGEMM grouped GEMM with
-                                 its GEMV path disabled; prefill on tuned Gems
-  VLLM_FL_M3_DENSE=hybrid        per-M split-K Triton / tuned Gems for decode linears
-                                 (BF16 M<=128, FP32 router M<=512)
-  VLLM_FL_M3_GEMMA_NORM=flaggems Gems Gemma RMSNorm / fused add RMSNorm
-  VLLM_FL_M3_FUSED_IMPL=triton   Triton Q/K norm + RoPE + KV insert
-Any switch also installs the shape-stable Gems index / moe_align kernels.
-Keep `index` in VLLM_FL_FLAGOS_BLACKLIST (see README: ~1 GiB less KV cache).
-See README.md in this directory for measurements and the launch recipe.
-"""
+VLLM_FL_MOE=hybrid selects DeepGEMM decode and FlagGems prefill experts.
+VLLM_FL_M3_DENSE=hybrid selects split-K / FlagGems small-batch linears.
+VLLM_FL_M3_GEMMA_NORM=flaggems selects FlagGems Gemma RMSNorm.
+VLLM_FL_M3_FUSED_IMPL=triton selects fused Q/K norm, RoPE and KV insertion.
+Any switch also installs shared shape-stable index / MoE alignment kernels.
+See ../README.md for supported configurations and required exclusions."""
 
 import os
 

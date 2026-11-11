@@ -1,0 +1,23 @@
+platform: thead
+vendor: thead
+
+device_types:
+  ppu:
+    tags: [bf16, fp16]
+
+tolerance:
+  inference:
+    default: {rtol: 1e-3, atol: 1e-3}
+
+unsupported_features: []
+env_defaults: {}
+
+ppu:
+  name: ppu
+  tests:
+    functional:
+      include: "*"
+      exclude: [compilation, distributed, ops]
+    unit:
+      include: "*"
+      exclude: []

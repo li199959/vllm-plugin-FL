@@ -1,25 +1,12 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-"""BAAI bge-m3 (XLMRobertaModel, dense CLS embedding, pooling runner) on PPU.
+"""BGE-M3 (XLMRobertaModel, dense CLS pooling) opt-in kernels for PPU.
 
-Every serving batch has a different total token count, and the CLS pooler
-gathers rows out of that [num_tokens, 1024] tensor with aten.index. Gems
-generates an index kernel with that size baked in, so the original
-configuration codegens/tunes a kernel on almost every batch (multi-second
-stalls). Switches (all opt-in; unset keeps the original configuration):
-  VLLM_FL_BGEM3_STABLE=1        shape-stable Gems index / copy_ (common/shape_stable)
-  VLLM_FL_BGEM3_DENSE=hybrid    linears in VLLM_FL_BGEM3_GEMS_LINEARS (qkv,o,fc1,fc2;
-                                default o) on a tuned Gems linear_kernel, plus every
-                                projection for batches <= VLLM_FL_BGEM3_GEMS_SMALL_M
-                                tokens (default 0 = off); the rest stays on cuBLAS, so
-                                meant for configs that blacklist Gems mm/addmm/linear
-  VLLM_FL_BGEM3_ATTN=fa3        encoder-only attention on the PPU FA3 wheel instead of
-                                vLLM's Triton context_attention_fwd (3.3x faster)
-
-Needed independently of these switches: the Gems ``broadcast_to`` override does
-a pinned H2D copy, which is illegal during CUDA graph capture, and XLM-R's
-biased linears reach it through addmm. Serve with
-VLLM_FL_FLAGOS_BLACKLIST_APPEND=broadcast_to (aten's broadcast_to is a view).
-"""
+VLLM_FL_BGEM3_STABLE=1 enables shape-stable index and copy kernels.
+VLLM_FL_BGEM3_DENSE=hybrid uses FlagGems for selected projections and
+small batches; VLLM_FL_BGEM3_GEMS_LINEARS and VLLM_FL_BGEM3_GEMS_SMALL_M
+control selection. Other projections retain the configured native path.
+VLLM_FL_BGEM3_ATTN=fa3 selects eligible encoder attention on the PPU FA3 wheel.
+See ../README.md for required exclusions and configuration."""
 
 import os
 
@@ -36,8 +23,11 @@ def _stable():
 
 
 def enabled() -> bool:
-    return (_stable() or _env("VLLM_FL_BGEM3_DENSE") == "hybrid"
-            or _env("VLLM_FL_BGEM3_ATTN") == "fa3")
+    return (
+        _stable()
+        or _env("VLLM_FL_BGEM3_DENSE") == "hybrid"
+        or _env("VLLM_FL_BGEM3_ATTN") == "fa3"
+    )
 
 
 def register() -> None:
@@ -45,7 +35,10 @@ def register() -> None:
     if _registered:
         return
     if _stable():
-        from ..common.shape_stable import install_shape_stable_copy, install_shape_stable_gems
+        from ..common.shape_stable import (
+            install_shape_stable_copy,
+            install_shape_stable_gems,
+        )
 
         install_shape_stable_gems()
         install_shape_stable_copy()
