@@ -3,13 +3,8 @@
 
 import importlib
 
-_MODELS: tuple[str, ...] = (
-    "minimax_m3",
-    "qwen3_vl_moe",
-    "bge_m3",
-    "unlimited_ocr",
-    "qwen3_vl_embedding",
-)
+_MODELS: tuple[str, ...] = ("minimax_m3", "qwen3_vl_moe", "bge_m3", "unlimited_ocr",
+                            "qwen3_vl_embedding", "whisper")
 
 
 def model_packages():
