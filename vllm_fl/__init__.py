@@ -164,6 +164,18 @@ def register_model():
     from vllm_fl.patches.qwen3_5_text import apply_qwen3_5_text_patches
 
     apply_qwen3_5_text_patches()
+    try:
+        from vllm_fl.patches.flaggems_contiguous import apply_flaggems_contiguous_patches
+
+        apply_flaggems_contiguous_patches()
+    except Exception as e:
+        logger.error(f"FlagGems contiguous-input patch error: {str(e)}")
+    try:
+        from vllm_fl.patches.flaggems_libcache import apply_flaggems_libcache_patch
+
+        apply_flaggems_libcache_patch()
+    except Exception as e:
+        logger.error(f"FlagGems tuning-cache patch error: {str(e)}")
     patch_vllm_moe_sum()
     minimax_m3_patches()
 
