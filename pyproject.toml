@@ -168,6 +168,15 @@ ignore = [
     "G004",  # logging f-string
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Benchmark scripts time lambdas inside the loop that defines their inputs.
+"tools/ppu/**" = ["B023"]
+# These lambdas run before the `del` that frees their inputs at the end of the loop.
+"tools/ppu/minimax_m3/bench_hybrid_vs_native.py" = ["B023", "F821"]
+"tools/ppu/minimax_m3/sweep_small_m.py" = ["B023", "F821"]
+"tools/ppu/minimax_m3/sweep_splitk.py" = ["B023", "F821"]
+"tools/ppu/qwen3_vl_moe/bench_decode_attention.py" = ["B023", "F821"]
+
 [tool.ruff.lint.isort]
 combine-as-imports = true
 known-first-party = ["vllm"]

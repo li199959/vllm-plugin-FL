@@ -61,6 +61,11 @@ def _disable_flaggems_runtime_autotune() -> None:
             return cfg, {}
 
         LibTuner.policy = _policy_first_config
+        # Newer Gems registers policy subclasses which override the base
+        # method. Generated index kernels instantiate these during serving;
+        # patch the registered implementations as well as the base class.
+        for tuner in LibTuner._dispatch_table.values():
+            tuner.policy = _policy_first_config
         LibTuner._fl_no_autotune = True
         logger.info(
             "FlagGems runtime autotune disabled (first-config pinned); "
@@ -135,6 +140,12 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     # Must run before flag_gems.enable() below: pin LibTuner before any
     # kernel gets its first (tuning) call.
     _disable_flaggems_runtime_autotune()
+
+    # Opt-in per-model/per-vendor kernels (vllm_fl/optimizations/); must run
+    # after native schemas are registered above.
+    from vllm_fl.optimizations import register_model_optimizations
+
+    register_model_optimizations()
 
     # Deferred M3 fused-op eager-break wrap: breakable_cudagraph is not
     # importable during early plugin load, so bind it once workers are up.

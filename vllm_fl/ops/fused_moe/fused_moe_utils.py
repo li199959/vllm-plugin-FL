@@ -102,6 +102,12 @@ def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig,
         "select_unquantized_moe_backend_oot called (flaggems=%s)", use_flaggems()
     )
     if current_platform.is_out_of_tree() and use_flaggems():
+        # Opt-in model-specific experts (vllm_fl/optimizations/).
+        from vllm_fl.optimizations import select_moe_experts
+
+        model_experts = select_moe_experts()
+        if model_experts is not None:
+            return UnquantizedMoeBackend.TRITON, model_experts
         # Opt-in (VLLM_FL_MOE=deepgemm): route BF16 experts through the
         # PPU-native DeepGEMM grouped GEMM instead of FlagGems Triton fused_moe.
         from vllm_fl.utils import use_deepgemm_moe
@@ -298,6 +304,10 @@ def _prepare_expert_assignment(
     )
 
 class TritonExpertsFL(TritonExperts):
+    def tuned_config(self, E, num_tokens, N, K, top_k_num, dtype, activation):
+        """Model-specific subclasses may return a fixed kernel config."""
+        return None
+
     def apply(
         self,
         output: torch.Tensor,
@@ -316,8 +326,14 @@ class TritonExpertsFL(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        # Fast path (no LoRA, NVIDIA only): single fused FlagGems call.
-        if self._lora_context is None and current_platform.is_cuda():
+        # The fused FlagGems entry currently accepts only plain SiLU.
+        # M3 needs the modular path to preserve its clamped SwiGLU params.
+        if (
+            self._lora_context is None
+            and current_platform.is_cuda()
+            and activation == MoEActivation.SILU
+            and self.quant_config.gemm1_clamp_limit is None
+        ):
             import flag_gems
 
             output.copy_(flag_gems.fused_experts_impl(
@@ -383,6 +399,12 @@ class TritonExpertsFL(TritonExperts):
             num_tokens,
             block_shape=self.block_shape,
         )
+
+        tuned = self.tuned_config(
+            E, num_tokens, N, K, top_k_num, hidden_states.dtype, activation
+        )
+        if tuned is not None:
+            config = tuned
 
         if hidden_states.dtype == torch.bfloat16:
             compute_type = tl.bfloat16
